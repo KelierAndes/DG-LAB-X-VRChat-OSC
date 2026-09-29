@@ -13,10 +13,9 @@ config.json
 *.log
 smoke_result.txt
 
-# ===== 参考资料（第三方上游仓库克隆与调查脚本，不随项目分发）=====
+# ===== 参考资料（调查脚本与运行时备份，不随项目分发）=====
+# 注：dglab-websocket-server / dglab-websocket-simple 已改为 git submodule，不在此忽略
 _research/
-dglab-websocket-server/
-dglab-websocket-simple/
 
 # ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
 .git/

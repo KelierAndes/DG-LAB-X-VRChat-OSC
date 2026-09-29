@@ -94,6 +94,14 @@ py -3.12 -m venv .venv          （已有 .venv 可跳过）
 
 WinUI 3 部分使用 [`win32more`](https://pypi.org/project/win32more/)（纯 Python 的 WinRT/WinUI 3 绑定），wheel 自带 Windows App SDK 自包含 DLL，**一般无需额外安装运行时**；若启动报 `RuntimeNotFoundError`，安装一次 [Windows App Runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads) 即可。
 
+`dglab-websocket-server` / `dglab-websocket-simple` 是**仅作协议对照的参考资料子模块，不是运行依赖**，不拉取也能正常构建运行。需要时：
+
+```bat
+git clone --recursive https://github.com/KelierAndes/DG-LAB-X-VRChat-OSC.git
+:: 已克隆过则补拉子模块
+git submodule update --init --recursive
+```
+
 ### VRChat 侧设置
 
 1. 游戏内打开动作菜单 → **OSC → Enabled** 开启 OSC。
@@ -118,11 +126,17 @@ dglab/
   ble.py                 BLE 直连（V3: B0/BF/B1 + 电池；V2: PWM_AB2/A34/B34）
   waves.py               波形工具（频率分段映射、hex 帧解析/构造、X/Y/Z 算法）
   official_waveforms.py  DG-Lab 官方 24 组波形数据（移植自官方 dglab-kit-python，GPL-3.0）
+  official_waveforms_ovc.py  负鼠官方 20 组振动波形数据（同上，GPL-3.0）
   state.py               EngineState/Slot 状态模型与事件总线
 vrc/osc_bridge.py        VRChat OSC 桥（python-osc；参数输出节流 + 输入映射）
 ui/main_window.py        WinUI 3 主窗口（XAML 加载、二维码、滑条、OSC 配置、日志）
 tests/test_protocol.py   协议单元测试
+
+dglab-websocket-server/  [submodule] 官方 V4/V3 中继参考实现（Bun/TS，GPL-3.0）
+dglab-websocket-simple/  [submodule] 官方协议文档与波形示例（JS）
 ```
+
+两个 submodule 只是协议对照资料，**不参与构建与运行**——`dglab/relay_v3.py`、`relay_v4.py` 是照其 TS 实现移植后的独立 Python 代码。
 
 线程模型：引擎在后台线程跑 asyncio 事件循环；UI 通过 `asyncio.run_coroutine_threadsafe` 下发命令，协议层事件经队列由 UI 线程的 `DispatcherQueueTimer` 消费（WinRT 委托不能在非 UI 线程创建）。
 
@@ -140,7 +154,7 @@ tests/test_protocol.py   协议单元测试
 
 主要参考（协议部分禁止商用，授权见官方仓库）：
 
-* 官方协议仓库 [dungeonlab-open/dglab-bluetooth-protocol](https://github.com/dungeonlab-open/dglab-bluetooth-protocol)、[dglab-websocket-simple](https://github.com/dungeonlab-open/dglab-websocket-simple)
+* 官方协议仓库 [dungeonlab-open/dglab-bluetooth-protocol](https://github.com/dungeonlab-open/dglab-bluetooth-protocol)、[dglab-websocket-simple](https://github.com/dungeonlab-open/dglab-websocket-simple)（后者已作为 submodule 引入）
 * 官方 SDK [dglab-kit](https://github.com/dungeonlab-open/dglab-kit)、[dglab-kit-python](https://github.com/dungeonlab-open/dglab-kit-python)（V4/V3 线协议与波形数据的权威实现）
 * [VRChat OSC 文档](https://docs.vrchat.com/docs/osc-overview)、[头像参数](https://docs.vrchat.com/docs/osc-avatar-parameters)
 * [win32more](https://pypi.org/project/win32more/)（WinUI 3 Python 绑定）、[python-osc](https://pypi.org/project/python-osc/)、[bleak](https://pypi.org/project/bleak/)
