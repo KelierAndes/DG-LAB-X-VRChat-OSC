@@ -1,0 +1,19 @@
+# ===== 本地环境与构建产物 =====
+.venv/
+venv/
+__pycache__/
+*.pyc
+.vs/
+build/
+dist/
+*.spec.bak
+
+# ===== 本地配置与日志（首次运行自动生成，含个人设备/端口设置）=====
+config.json
+*.log
+smoke_result.txt
+
+# ===== 参考资料（第三方上游仓库克隆与调查脚本，不随项目分发）=====
+_research/
+dglab-websocket-server/
+dglab-websocket-simple/

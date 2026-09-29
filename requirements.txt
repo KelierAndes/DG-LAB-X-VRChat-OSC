@@ -1,0 +1,6 @@
+bleak>=3.0
+python-osc>=1.9
+websockets>=12
+qrcode>=8
+pillow>=10
+win32more>=0.8

@@ -1,0 +1,50 @@
+# ===== 本地环境与构建产物 =====
+.venv/
+venv/
+__pycache__/
+*.pyc
+.vs/
+build/
+dist/
+*.spec.bak
+
+# ===== 本地配置与日志（首次运行自动生成，含个人设备/端口设置）=====
+config.json
+*.log
+smoke_result.txt
+
+# ===== 参考资料（第三方上游仓库克隆与调查脚本，不随项目分发）=====
+_research/
+dglab-websocket-server/
+dglab-websocket-simple/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）
