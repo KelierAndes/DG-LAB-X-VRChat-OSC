@@ -1,17 +1,21 @@
-# ===== 本地环境与构建产物 =====
+# ===== 本地环境与中间产物 =====
 .venv/
 venv/
 __pycache__/
 *.pyc
 .vs/
-build/
-dist/
 *.spec.bak
+
+# PyInstaller 中间目录（dist/ 是构建产物，已入库用于分发，不忽略）
+build/
 
 # ===== 本地配置与日志（首次运行自动生成，含个人设备/端口设置）=====
 config.json
 *.log
 smoke_result.txt
+
+# ===== 开发文档（仅本地维护，不随仓库分发）=====
+DEVELOPMENT.md
 
 # ===== 参考资料（调查脚本与运行时备份，不随项目分发）=====
 # 注：dglab-websocket-server / dglab-websocket-simple 已改为 git submodule，不在此忽略
