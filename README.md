@@ -173,3 +173,20 @@ tests/test_protocol.py   协议单元测试
 ## 安全提示
 
 这是电刺激设备控制工具。请从低强度开始，**始终设置安全上限**（界面「最大强度上限」，控制强度会被钳制到该值），急停按钮可随时清零强度并停止波形。Wave/X/Y/Z 参数不当可能引起刺痛（脉冲宽度 Z>20 时更明显）。请自行承担使用风险，并遵守官方协议的非商业使用条款。
+
+## 许可
+
+本项目以 **GNU General Public License v3.0**（GPL-3.0）发布，全文见 [LICENSE](LICENSE)。
+
+Copyright (C) 2026 Kelier Andes
+
+选择 GPL-3.0 而非 MIT 等宽松许可，是因为本项目包含移植自同样以 GPL-3.0 授权的官方代码——GPL-3.0 要求衍生作品整体以 GPL-3.0 分发：
+
+| 本项目文件 | 移植来源 | 上游许可 |
+|---|---|---|
+| `dglab/official_waveforms.py`、`dglab/official_waveforms_ovc.py` | [dglab-kit-python](https://github.com/dungeonlab-open/dglab-kit-python) | GPL-3.0 |
+| `dglab/relay_v3.py`、`dglab/relay_v4.py` | [dglab-websocket-server](https://github.com/dungeonlab-open/dglab-websocket-server) v3-server.ts / v4-server.ts | GPL-3.0 |
+
+以 submodule 引入的两个参考仓库为**独立作品**，各自适用其上游许可，不受本项目许可影响：`dglab-websocket-server` 为 GPL-3.0；`dglab-websocket-simple` 上游未附许可证文件，仅可作协议阅读参考。
+
+DG-Lab 官方协议文档另有「协议部分禁止商用」条款，商用前请自行确认并遵守。
