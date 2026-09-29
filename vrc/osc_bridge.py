@@ -77,6 +77,8 @@ class OscBridge:
         self._action_value = 0
         self._action_until = 0.0
         self._last_sent: dict[str, Any] = {}
+        self.last_rx: float | None = None
+        self.rx_count = 0
 
         if events is not None:
             events.on("action", self._on_action)
@@ -88,8 +90,22 @@ class OscBridge:
         self._action_value = int(action)
         self._action_until = time.monotonic() + 0.3
 
+    def _map(self, address: str, handler) -> None:
+        def tracked(addr, *args):
+            self.last_rx = time.monotonic()
+            self.rx_count += 1
+            handler(addr, *args)
+
+        self._dispatcher.map(address, tracked)
+
     def _register_handlers(self) -> None:
         cfg = self.config
+
+        def track_default(addr, *args):
+            self.last_rx = time.monotonic()
+            self.rx_count += 1
+
+        self._dispatcher.set_default_handler(track_default)
 
         def make_set_strength(ch: str, family: str = "COYOTE"):
             def handler(_addr, *args):
@@ -162,30 +178,30 @@ class OscBridge:
         def avatar_change(_addr, *args):
             self._last_sent.clear()
 
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_strength_a']}", make_set_strength("A"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_strength_b']}", make_set_strength("B"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_wave_a']}", make_wave("A"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_wave_b']}", make_wave("B"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_zap_a']}", make_zap("A"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_zap_b']}", make_zap("B"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_fire']}", make_fire("COYOTE"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_emergency']}", emergency)
-        self._dispatcher.map(f"/avatar/parameters/{cfg.get('in_wave_step_a', 'DGLabWaveStepA')}",
+        self._map(f"/avatar/parameters/{cfg['in_strength_a']}", make_set_strength("A"))
+        self._map(f"/avatar/parameters/{cfg['in_strength_b']}", make_set_strength("B"))
+        self._map(f"/avatar/parameters/{cfg['in_wave_a']}", make_wave("A"))
+        self._map(f"/avatar/parameters/{cfg['in_wave_b']}", make_wave("B"))
+        self._map(f"/avatar/parameters/{cfg['in_zap_a']}", make_zap("A"))
+        self._map(f"/avatar/parameters/{cfg['in_zap_b']}", make_zap("B"))
+        self._map(f"/avatar/parameters/{cfg['in_fire']}", make_fire("COYOTE"))
+        self._map(f"/avatar/parameters/{cfg['in_emergency']}", emergency)
+        self._map(f"/avatar/parameters/{cfg.get('in_wave_step_a', 'DGLabWaveStepA')}",
                              make_wave_step("A"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg.get('in_wave_step_b', 'DGLabWaveStepB')}",
+        self._map(f"/avatar/parameters/{cfg.get('in_wave_step_b', 'DGLabWaveStepB')}",
                              make_wave_step("B"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_strength_a']}", make_set_strength("A", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_strength_b']}", make_set_strength("B", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_wave_a']}", make_wave("A", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_wave_b']}", make_wave("B", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg.get('in_ovc_wave_step_a', 'DGLabOvcInWaveStepA')}",
+        self._map(f"/avatar/parameters/{cfg['in_ovc_strength_a']}", make_set_strength("A", "OVC"))
+        self._map(f"/avatar/parameters/{cfg['in_ovc_strength_b']}", make_set_strength("B", "OVC"))
+        self._map(f"/avatar/parameters/{cfg['in_ovc_wave_a']}", make_wave("A", "OVC"))
+        self._map(f"/avatar/parameters/{cfg['in_ovc_wave_b']}", make_wave("B", "OVC"))
+        self._map(f"/avatar/parameters/{cfg.get('in_ovc_wave_step_a', 'DGLabOvcInWaveStepA')}",
                              make_wave_step("A", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg.get('in_ovc_wave_step_b', 'DGLabOvcInWaveStepB')}",
+        self._map(f"/avatar/parameters/{cfg.get('in_ovc_wave_step_b', 'DGLabOvcInWaveStepB')}",
                              make_wave_step("B", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_zap_a']}", make_zap("A", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_zap_b']}", make_zap("B", "OVC"))
-        self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_fire']}", make_fire("OVC"))
-        self._dispatcher.map("/avatar/change", avatar_change)
+        self._map(f"/avatar/parameters/{cfg['in_ovc_zap_a']}", make_zap("A", "OVC"))
+        self._map(f"/avatar/parameters/{cfg['in_ovc_zap_b']}", make_zap("B", "OVC"))
+        self._map(f"/avatar/parameters/{cfg['in_ovc_fire']}", make_fire("OVC"))
+        self._map("/avatar/change", avatar_change)
 
     def _spawn(self, coro) -> None:
         loop = self._loop

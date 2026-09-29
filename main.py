@@ -10,6 +10,8 @@ import traceback
 
 from win32more.winui3 import XamlApplication
 
+from ui.shell import App
+
 CRASH_LOG = os.path.join(tempfile.gettempdir(), "dglab_osc_crash.log")
 REPORT = {}
 
@@ -21,28 +23,6 @@ def _log_crash(context: str) -> None:
             f.write(traceback.format_exc())
     except OSError:
         pass
-
-
-class App(XamlApplication):
-    engine = None
-    window = None
-
-    def OnLaunched(self, args) -> None:
-        try:
-            from app import Engine
-            from ui.main_window import MainWindow
-
-            if App.engine is None:
-                engine = Engine()
-                engine.start()
-                App.engine = engine
-            self.window = MainWindow(App.engine)
-            App.window = self.window
-            REPORT["launched"] = True
-        except Exception:
-            _log_crash("OnLaunched")
-            REPORT["launched"] = False
-            raise
 
 
 def _run_selftest() -> None:
@@ -62,21 +42,72 @@ def _run_selftest() -> None:
         def probe_and_close():
             try:
                 win = App.window
-                REPORT["status_text"] = win.StatusText.Text
-                REPORT["wave_count"] = win.WaveA.Items.Size
-                REPORT["osc_toggle"] = bool(win.OscToggle.IsOn)
-                before = str(win.ui.RequestedTheme)
-                win.BtnTheme_Click(None, None)
-                after = str(win.ui.RequestedTheme)
-                win.BtnTheme_Click(None, None)
+                # 注入模拟设备状态，验证实时数据装配路径
+                from dglab.state import EngineState, Slot
+
+                fake = EngineState(backend="ble", connected=True, paired=True,
+                                   status_text="自检模拟状态")
+                fake.slots["AABBCCDDEEFF"] = Slot(
+                    slot_id="AABBCCDDEEFF", name="郊狼自检", type="COYOTE_1",
+                    strength={"A": 62, "B": 46},
+                    strength_limit={"A": 200, "B": 200}, battery=76)
+                fake.slots["112233445599"] = Slot(
+                    slot_id="112233445599", name="负鼠自检", type="OVC_1",
+                    strength={"A": 20, "B": 30},
+                    strength_limit={"A": 200, "B": 200}, battery=64)
+                fake.slots["112233445566"] = Slot(
+                    slot_id="112233445566", name="灵猫自检", type="BMTR_1",
+                    pressure=18.4, edge_state=1, battery=41)
+                win.state = fake
+
+                for tag in ("dashboard", "connect", "control", "link", "log", "settings"):
+                    win.goto(tag)
+                    page = win._page(tag)
+                    REPORT[f"page_{tag}"] = page is not None
+                    try:
+                        tick = getattr(page, "tick", None)
+                        if tick is not None:
+                            tick()
+                        REPORT[f"tick_{tag}_ok"] = True
+                    except Exception as exc:
+                        REPORT[f"tick_{tag}_ok"] = False
+                        REPORT["tick_error"] = f"{tag}: {exc!r}"
+
+                control = win._page("control")
+                control.tick()
+                view = control._cards.get("AABBCCDDEEFF")
+                REPORT["ctrl_label_a"] = view.labels["A"].Text if view else None
+
+                ovc = control._cards.get("112233445599")
+                page._updating = False
+                combo_a = view.wave_combos["A"]
+                combo_a.SelectedIndex = 1
+                combo_a.SelectedIndex = 2
+                REPORT["wave_step_ok"] = combo_a.SelectedIndex == 2
+                led = ovc.led_combo
+                led.SelectedIndex = 2
+                REPORT["led_pick_ok"] = led.SelectedIndex == 2
+                binding = next(iter(ovc.bindings.values()))
+                binding.SelectedIndex = 1
+                REPORT["binding_pick_ok"] = binding.SelectedIndex == 1
+                page._updating = True
+
+                win.goto("dashboard")
+                win._page("dashboard").tick()
+
+                before = str(win.RootGrid.RequestedTheme)
+                win.toggle_theme()
+                after = str(win.RootGrid.RequestedTheme)
                 REPORT["theme_before"] = before
                 REPORT["theme_after_toggle"] = after
                 REPORT["theme_ok"] = before != after
+                REPORT["nav_tags"] = sorted(win._items.keys())
+                REPORT["status_text"] = win.state.status_text
             except Exception:
                 _log_crash("selftest probe")
                 REPORT["error"] = "probe failed"
             try:
-                win.window.Close()
+                win.Close()
             except Exception:
                 pass
 
@@ -108,8 +139,10 @@ def main() -> int:
             path = os.path.join(tempfile.gettempdir(), "dglab_osc_selftest.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(REPORT, f, ensure_ascii=False, default=str, indent=2)
-            if REPORT.get("launched") and "error" not in REPORT:
-                code = 0
+            if REPORT.get("launched", True) and "error" not in REPORT:
+                ok = all(v for k, v in REPORT.items()
+                         if k.startswith("page_") or k.endswith("_ok"))
+                code = 0 if ok else 1
             else:
                 code = 1
         except OSError:

@@ -679,5 +679,278 @@ class FrameLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(frames[0][1]["type"], "hello")
 
 
+class WaveMonitorThreadTests(unittest.TestCase):
+    def test_window_during_record_never_raises(self):
+        import threading
+        import time as _time
+
+        from dglab.monitor import WaveMonitor
+
+        monitor = WaveMonitor()
+        stop = threading.Event()
+        errors: list[str] = []
+
+        def writer():
+            i = 0
+            while not stop.is_set():
+                monitor.record((i % 100,) * 4, (i % 50,) * 4)
+                i += 1
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    monitor.window(5.0)
+                    monitor.last_strength()
+                except Exception as exc:
+                    errors.append(repr(exc))
+                _time.sleep(0.001)
+
+        threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+        for t in threads:
+            t.start()
+        _time.sleep(0.5)
+        stop.set()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+
+
+class LogBufferMirrorTests(unittest.TestCase):
+    def test_ui_messages_mirror_engine_messages_do_not(self):
+        from ui.live import LogBuffer
+
+        buffer = LogBuffer()
+        mirrored: list[str] = []
+        buffer.mirror = mirrored.append
+        buffer.append("ui-msg")
+        buffer.append("engine-msg", from_engine=True)
+        self.assertEqual(mirrored, ["ui-msg"])
+        self.assertEqual(buffer.snapshot()[-1][2], "engine-msg")
+
+
+class OvcBindingActionTableTests(unittest.TestCase):
+    def test_button_actions_match_engine(self):
+        import app as app_module
+
+        from ui import live
+
+        self.assertEqual(tuple(k for k, _ in live.BUTTON_ACTIONS),
+                         app_module.Engine._OVC_BUTTON_ACTIONS)
+
+
+    async def test_binding_strength_single_channel(self):
+        import app as app_module
+
+        engine = app_module.Engine()
+        engine.start()
+        try:
+            calls: list[tuple] = []
+
+            async def fake_add(channel, delta, slot_id=None):
+                calls.append((channel, delta, slot_id))
+
+            engine.add_strength = fake_add
+            bindings = engine.config.setdefault("ble", {}).setdefault("ovc_buttons", {})
+            bindings["13"] = "a_strength_up"
+            engine._on_ovc_button("addr-ovc", 13)
+            bindings["13"] = "b_strength_down"
+            engine._on_ovc_button("addr-ovc", 13)
+            await asyncio.sleep(0.3)
+            self.assertEqual(calls, [("A", 1, "addr-ovc"), ("B", -1, "addr-ovc")])
+        finally:
+            engine.stop()
+
+    async def test_binding_wave_single_channel(self):
+        import app as app_module
+
+        engine = app_module.Engine()
+        engine.start()
+        try:
+            waves: list[tuple] = []
+
+            async def fake_set_wave(channel, name, slot_id=None):
+                waves.append((channel, name))
+
+            engine.set_wave = fake_set_wave
+            bindings = engine.config.setdefault("ble", {}).setdefault("ovc_buttons", {})
+            bindings["13"] = "a_wave_up"
+            engine._on_ovc_button("addr-ovc", 13)
+            bindings["13"] = "b_wave_down"
+            engine._on_ovc_button("addr-ovc", 13)
+            await asyncio.sleep(0.3)
+            self.assertEqual(waves, [("A", CONTINUOUS), ("B", SILENT)])
+        finally:
+            engine.stop()
+
+
+class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
+    def _engine(self):
+        import os
+        import tempfile
+
+        import app as app_module
+
+        cfg_path = os.path.join(tempfile.gettempdir(), "dglab_test_engine_cfg.json")
+        if os.path.exists(cfg_path):
+            os.remove(cfg_path)
+        engine = app_module.Engine(config_path=cfg_path)
+        engine.start()
+        return engine
+
+    async def test_device_setting_falls_back_to_global(self):
+        engine = self._engine()
+        try:
+            self.assertEqual(engine.device_setting("s1", "max_strength"), 100)
+            engine.config.setdefault("device_settings", {})["s1"] = {"max_strength": 50}
+            self.assertEqual(engine.device_setting("s1", "max_strength"), 50)
+            self.assertEqual(engine.device_setting("s2", "max_strength"), 100)
+            self.assertEqual(engine.device_setting("s1", "fire_strength"), 0)
+        finally:
+            engine.stop()
+
+    async def test_set_strength_clamps_to_device_limit(self):
+        engine = self._engine()
+        try:
+            calls: list[tuple] = []
+
+            class FakeV4(SocketV4Client):
+                async def set_strength(self, channel, value, slot_id=None):
+                    calls.append((slot_id, channel, value))
+
+            backend = FakeV4(events=StateEvents())
+            backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030"}])
+            engine._backend = backend
+            engine.config.setdefault("device_settings", {})["s1"] = {"max_strength": 42}
+            await engine.set_strength("A", 100, slot_id="s1")
+            self.assertEqual(calls, [("s1", "A", 42)])
+        finally:
+            engine.stop()
+
+    async def test_fire_uses_device_fire_strength(self):
+        engine = self._engine()
+        try:
+            seen: list[int | None] = []
+
+            class FakeV4(SocketV4Client):
+                async def fire(self, slot_id=None, duration_s=1.0, value=None):
+                    seen.append(value)
+
+            backend = FakeV4(events=StateEvents())
+            backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030",
+                                              "slotState": {"channelA": {"intensityMax": 200},
+                                                            "channelB": {"intensityMax": 200}}}])
+            engine._backend = backend
+            engine.config.setdefault("device_settings", {})["s1"] = {"fire_strength": 33}
+            await engine.fire(slot_id="s1", duration_s=0.01)
+            self.assertEqual(seen[-1], 33)
+        finally:
+            engine.stop()
+
+    async def test_emergency_stop_zeros_and_resets_wave(self):
+        engine = self._engine()
+        try:
+            waves: list[tuple] = []
+
+            class FakeV4(SocketV4Client):
+                async def emergency_stop(self):
+                    pass
+
+                async def set_strength(self, channel, value, slot_id=None):
+                    pass
+
+                async def set_wave(self, channel, waveform, duration_s=10.0, slot_id=None):
+                    waves.append((slot_id, channel, waveform))
+
+            backend = FakeV4(events=StateEvents())
+            backend._replace_devices("app", [
+                {"slotId": "s1", "type": "COYOTE_030",
+                 "props": {"intensityA": 50, "intensityB": 40}},
+                {"slotId": "bm", "type": "BMTR_1"},
+            ])
+            engine._backend = backend
+            engine._selected_wave["A"] = "wave_x"
+            await engine.emergency_stop()
+            silent = [w for w in waves if w[2] == SILENT]
+            self.assertEqual({w[0] for w in silent}, {"s1"})
+            self.assertEqual(len(silent), 2)
+            self.assertEqual(engine._selected_wave["A"], SILENT)
+            self.assertEqual(engine._selected_wave["B"], SILENT)
+        finally:
+            engine.stop()
+
+    async def test_log_frame_goes_to_file_only(self):
+        engine = self._engine()
+        try:
+            seen: list[str] = []
+            engine.events.on("log", seen.append)
+            engine.config["log_frames"] = True
+            engine.log_frame(">>", {"type": "message", "data": {"t": 3}})
+            self.assertEqual(seen, [])
+            engine.config["log_frames"] = False
+            engine.log_frame(">>", {"type": "ping"})
+            self.assertEqual(seen, [])
+        finally:
+            engine.stop()
+
+    async def test_ble_disconnect_device_targets_slot(self):
+        from dglab.ble import BleClient
+
+        engine = self._engine()
+        try:
+            calls: list[str | None] = []
+
+            class FakeBle(BleClient):
+                async def disconnect(self, slot_id=None):
+                    calls.append(slot_id)
+
+            engine._backend = FakeBle(events=StateEvents())
+            await engine.ble_disconnect_device("addr-1")
+            self.assertEqual(calls, ["addr-1"])
+        finally:
+            engine.stop()
+
+    async def test_set_file_logging_toggles_handler(self):
+        import logging as _logging
+
+        engine = self._engine()
+        try:
+            logger = engine._file_log
+            self.assertTrue(any(isinstance(h, _logging.FileHandler)
+                                for h in logger.handlers))
+            engine.set_file_logging(False)
+            self.assertFalse(any(isinstance(h, _logging.FileHandler)
+                                 for h in logger.handlers))
+            self.assertFalse(engine.config["log_to_file"])
+            engine.set_file_logging(True)
+            self.assertTrue(any(isinstance(h, _logging.FileHandler)
+                                for h in logger.handlers))
+        finally:
+            engine.stop()
+
+    async def test_step_device_wave_cycles_order(self):
+        engine = self._engine()
+        try:
+            waves: list[tuple] = []
+
+            class FakeV4(SocketV4Client):
+                async def set_wave(self, channel, waveform, duration_s=10.0, slot_id=None):
+                    waves.append((channel, waveform))
+
+            backend = FakeV4(events=StateEvents())
+            backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030"}])
+            engine._backend = backend
+            engine._selected_wave["A"] = SILENT
+            engine._selected_wave["B"] = SILENT
+            await engine._step_device_wave("s1", "A", +1)
+            self.assertEqual(waves, [("A", CONTINUOUS)])
+            await engine._step_device_wave("s1", "B", -1)
+            from vrc.osc_bridge import wave_order
+            self.assertEqual(waves[-1], ("B", wave_order("COYOTE")[-1]))
+            await engine._step_device_wave("s1", "A", -1)
+            self.assertEqual(waves[-1], ("A", SILENT))
+        finally:
+            engine.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ smoke_result.txt
 # ===== 开发文档（仅本地维护，不随仓库分发）=====
 DEVELOPMENT.md
 UI待办.txt
+待办事项.txt
 
 # ===== 参考资料（调查脚本与运行时备份，不随项目分发）=====
 # 注：dglab-websocket-server / dglab-websocket-simple 已改为 git submodule，不在此忽略

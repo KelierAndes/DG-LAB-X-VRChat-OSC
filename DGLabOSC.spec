@@ -14,6 +14,8 @@
 
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_dynamic_libs
 
+import os
+
 hiddenimports = (
     collect_submodules("win32more.Microsoft")
     + collect_submodules("win32more.Windows.Foundation")
@@ -26,7 +28,12 @@ hiddenimports = (
     + collect_submodules("qrcode")
 )
 
-datas = collect_data_files("win32more")
+# 页面 XAML 骨架是数据文件，运行时由 ui.paths 从 _MEIPASS/xaml 解析
+datas = collect_data_files("win32more") + [
+    (os.path.join(SPECPATH, "xaml", name), "xaml")
+    for name in sorted(os.listdir(os.path.join(SPECPATH, "xaml")))
+    if name.endswith(".xaml")
+]
 binaries = collect_dynamic_libs("win32more")
 
 a = Analysis(

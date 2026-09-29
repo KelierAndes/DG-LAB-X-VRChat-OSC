@@ -20,7 +20,7 @@ from dglab.socket_v4 import DEFAULT_V4_RELAY, SocketV4Client
 from dglab.state import EngineState, StateEvents, family_of
 from dglab.waves import (CONTINUOUS, COYOTE_WAVEFORMS, CoyoteWaveform, SILENT,
                          resolve_wave_frames)
-from vrc.osc_bridge import OscBridge, OscConfig
+from vrc.osc_bridge import OscBridge, OscConfig, wave_order
 
 
 def _base_dir() -> str:
@@ -52,8 +52,11 @@ class Config(dict):
             },
         },
         "osc": dict(OscConfig.DEFAULTS),
-        "relay": {"v4_port": 9998, "v3_port": 9999},
+        "relay": {"v4_port": 9998, "v3_port": 9999,
+                  "v4_local": False, "v3_local": False},
+        "device_settings": {},
         "log_frames": True,
+        "log_to_file": True,
         "auto_reconnect": True,
         "saved_devices": [],
     }
@@ -88,18 +91,25 @@ class Config(dict):
 import logging
 
 
-def _setup_file_logger(base_dir: str) -> logging.Logger:
+def _file_handler(base_dir: str) -> logging.FileHandler:
+    handler = logging.FileHandler(
+        os.path.join(base_dir, "dglab_osc.log"), encoding="utf-8"
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", "%Y-%m-%d %H:%M:%S")
+    )
+    return handler
+
+
+def _setup_file_logger(base_dir: str, enabled: bool = True) -> logging.Logger:
     logger = logging.getLogger("dglab_osc")
     logger.setLevel(logging.INFO)
-    if not logger.handlers:
+    logger.propagate = False
+    if enabled and not any(
+        isinstance(h, logging.FileHandler) for h in logger.handlers
+    ):
         try:
-            handler = logging.FileHandler(
-                os.path.join(base_dir, "dglab_osc.log"), encoding="utf-8"
-            )
-            handler.setFormatter(
-                logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", "%Y-%m-%d %H:%M:%S")
-            )
-            logger.addHandler(handler)
+            logger.addHandler(_file_handler(base_dir))
         except OSError:
             pass
     return logger
@@ -108,7 +118,8 @@ def _setup_file_logger(base_dir: str) -> logging.Logger:
 class Engine:
     def __init__(self, config_path: str | None = None):
         self.config = Config(config_path)
-        self._file_log = _setup_file_logger(_base_dir())
+        self._file_log = _setup_file_logger(_base_dir(),
+                                            bool(self.config.get("log_to_file", True)))
         self.events = StateEvents()
         self.loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -194,7 +205,7 @@ class Engine:
             text = str(frame)
         if len(text) > 300:
             text = text[:300] + f"...(+{len(text) - 300})"
-        self._log(f"{direction} {text}")
+        self._file_only(f"{direction} {text}")
 
     def get_state(self) -> EngineState:
         if self._backend is not None:
@@ -414,9 +425,16 @@ class Engine:
             return int(value / 10.0 + 0.5) * 10
         return value
 
+    def device_setting(self, slot_id: str | None, key: str):
+        settings = self.config.get("device_settings", {}).get(slot_id or "", {})
+        value = settings.get(key)
+        if value is None:
+            value = self.config.get(key)
+        return value
+
     async def set_strength(self, channel: str, value: int, slot_id: str | None = None) -> None:
         backend = self._require_backend()
-        limit = int(self.config["max_strength"])
+        limit = int(self.device_setting(slot_id, "max_strength") or 100)
         value = max(0, min(limit, int(value)))
         if isinstance(backend, SocketV4Client):
             sid = self.resolve_slot(slot_id, output_only=True)
@@ -438,7 +456,8 @@ class Engine:
             step = int(delta)
             if slot.type.upper().startswith("OVC"):
                 step = max(10, round(abs(delta) / 10.0) * 10) * (1 if delta > 0 else -1)
-            if step > 0 and slot.strength.get(channel, 0) >= int(self.config["max_strength"]):
+            if step > 0 and slot.strength.get(channel, 0) >= int(
+                    self.device_setting(sid, "max_strength") or 100):
                 return
             await backend.add_intensity(channel, step, slot_id=sid)
         elif isinstance(backend, SocketV3Client):
@@ -481,12 +500,34 @@ class Engine:
 
     async def emergency_stop(self) -> None:
         backend = self._require_backend()
+        self._cancel_fire_holds()
         await backend.emergency_stop()
+        state = self.get_state()
+        for sid in sorted(state.slots):
+            slot = state.slots[sid]
+            if not slot.is_output_device:
+                continue
+            for ch in ("A", "B"):
+                try:
+                    await self.set_strength(ch, 0, slot_id=sid)
+                    await self.set_wave(ch, SILENT, slot_id=sid)
+                except Exception as exc:
+                    self._log(f"急停清零失败 {sid}/{ch}: {exc!r}")
+        self._selected_wave["A"] = SILENT
+        self._selected_wave["B"] = SILENT
+        self._log("急停完成：全部输出设备强度清零，波形已重置为静默")
 
-    def _fire_value(self, slot) -> int:
-        cap = int(self.config.get("fire_strength") or 0)
+    def _cancel_fire_holds(self) -> None:
+        for hold in self._fire_holds.values():
+            task = hold.get("task")
+            if task is not None:
+                task.cancel()
+        self._fire_holds.clear()
+
+    def _fire_value(self, slot, sid: str | None = None) -> int:
+        cap = int(self.device_setting(sid, "fire_strength") or 0)
         if cap <= 0:
-            cap = int(self.config["max_strength"])
+            cap = int(self.device_setting(sid, "max_strength") or 100)
         cap = max(1, min(200, cap))
         if slot is not None:
             limit = min(slot.strength_limit.get("A", 200),
@@ -507,7 +548,7 @@ class Engine:
         duration = float(duration_s or self.config["fire_duration_s"])
         state = self.get_state()
         slot = state.slots.get(sid)
-        cap = self._fire_value(slot)
+        cap = self._fire_value(slot, sid)
         original = self._fire_waves(sid)
         switched = [ch for ch in ("A", "B") if original[ch] in ("", SILENT)]
         try:
@@ -536,7 +577,7 @@ class Engine:
             return
         state = self.get_state()
         slot = state.slots.get(sid)
-        value = self._fire_value(slot)
+        value = self._fire_value(slot, sid)
         hold = {
             "waves": self._fire_waves(sid),
             "strength": dict(slot.strength) if slot is not None else {"A": 0, "B": 0},
@@ -668,26 +709,56 @@ class Engine:
             return backend.monitors.get(sid) if sid else None
         return None
 
-    _OVC_BUTTON_ACTIONS = ("none", "fire", "zap_a", "zap_b", "estop")
-
     def _on_ovc_button(self, slot_id: str, bit: int) -> None:
         binding = self.config.get("ble", {}).get("ovc_buttons", {}).get(str(bit), "none")
-        if binding in ("", "none"):
+        if binding not in self._OVC_BUTTON_ACTIONS:
             return
         self._log(f"按键 bit{bit} → {binding}")
+
+        channel = "A" if binding.startswith("a_") else "B"
 
         async def _run() -> None:
             if binding == "fire":
                 await self.fire(slot_id=slot_id)
-            elif binding == "zap_a":
-                await self.fire(slot_id=slot_id)
-            elif binding == "zap_b":
-                await self.fire(slot_id=slot_id)
             elif binding == "estop":
                 await self.emergency_stop()
+            elif binding.endswith("_up") or binding.endswith("_down"):
+                delta = +1 if binding.endswith("_up") else -1
+                if "strength" in binding:
+                    await self.add_strength(channel, self._device_step(slot_id) * delta,
+                                            slot_id=slot_id)
+                else:
+                    await self._step_device_wave(slot_id, channel, delta)
 
         if self.loop is not None and self.loop.is_running():
             asyncio.run_coroutine_threadsafe(_run(), self.loop)
+
+    _OVC_BUTTON_ACTIONS = ("none", "a_strength_up", "a_strength_down",
+                           "a_wave_up", "a_wave_down",
+                           "b_strength_up", "b_strength_down",
+                           "b_wave_up", "b_wave_down",
+                           "fire", "estop")
+
+    def _device_step(self, slot_id: str) -> int:
+        try:
+            step = max(1, min(50, int(self.device_setting(slot_id, "strength_step"))))
+        except (TypeError, ValueError):
+            step = 1
+        slot = self.get_state().slots.get(slot_id)
+        if slot is not None and slot.type.upper().startswith("OVC"):
+            step = max(10, (step + 5) // 10 * 10)
+        return step
+
+    async def _step_device_wave(self, slot_id: str, channel: str, delta: int) -> None:
+        slot = self.get_state().slots.get(slot_id)
+        family = family_of(slot.type) if slot is not None else "COYOTE"
+        order = wave_order(family)
+        current = str(self._selected_wave.get(channel) or SILENT)
+        if current not in order:
+            current = SILENT
+        target = order[(order.index(current) + delta) % len(order)]
+        await self.set_wave(channel, target, slot_id=slot_id)
+        self._log(f"{slot_id} 通道 {channel} 波形步进 {'+' if delta > 0 else '-'}1 → {target}")
 
     async def reset_pressure(self, slot_id: str | None = None) -> None:
         backend = self._require_backend()
@@ -715,6 +786,25 @@ class Engine:
     async def osc_stop(self) -> None:
         if self.osc:
             await self.osc.stop()
+
+    def set_file_logging(self, enabled: bool) -> None:
+        self.config["log_to_file"] = bool(enabled)
+        logger = self._file_log
+        if enabled:
+            if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+                try:
+                    logger.addHandler(_file_handler(_base_dir()))
+                except OSError:
+                    pass
+            self._log("日志文件输出已开启")
+        else:
+            for h in list(logger.handlers):
+                if isinstance(h, logging.FileHandler):
+                    logger.removeHandler(h)
+                    try:
+                        h.close()
+                    except Exception:
+                        pass
 
     def save_config(self) -> None:
         self.config.save()
