@@ -1,4 +1,3 @@
-"""Protocol unit tests: run with  python -m unittest discover -s tests"""
 from __future__ import annotations
 
 import unittest
@@ -54,7 +53,6 @@ class WaveTests(unittest.TestCase):
         self.assertTrue(x >= 1)
 
     def test_official_waveforms(self):
-        # Every official preset must be well-formed hex frames.
         for wave in CoyoteWaveform:
             raw = COYOTE_WAVEFORMS[wave]["raw"]
             self.assertTrue(len(raw) >= 1, wave)
@@ -79,8 +77,6 @@ class SocketV4Tests(unittest.TestCase):
             _merge_patch({"a": 1, "b": {"x": 1}}, {"b": {"y": 2}}),
             {"a": 1, "b": {"x": 1, "y": 2}},
         )
-        # an ABSENT patch section keeps the current value - the App sends
-        # single-sided patches and the missing half must never wipe state
         self.assertEqual(_merge_patch(5, None), 5)
         self.assertEqual(_merge_patch({"a": 1}, None), {"a": 1})
         self.assertEqual(_merge_patch(None, None), None)
@@ -160,7 +156,6 @@ class SocketV3Tests(unittest.TestCase):
 
 class BleTests(unittest.TestCase):
     def test_b0_frame(self):
-        # Official doc example: A channel only, B disabled via strength 101.
         frame = build_b0(
             0, 0, 0, 0,
             [0x0A, 0x0A, 0x0A, 0x0A], [0x00, 0x0A, 0x14, 0x1E],

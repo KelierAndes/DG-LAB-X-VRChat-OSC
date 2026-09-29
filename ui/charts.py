@@ -1,15 +1,3 @@
-"""PIL-based chart rendering for the control pages.
-
-* :func:`render_wave_chart` - waveform preview for Coyote (frequency +
-  strength lanes) and OVC (strength lanes), one lane per channel pair.
-* :func:`render_pressure_chart` - rolling pressure line chart for BMTR
-  (fixed 0-60 kPa scale, matching the DG-Lab app).
-
-Charts render with a transparent background in RGBA so they blend with the
-light/dark UI theme; ``dark=True`` switches lane/line/text colors.
-
-All text labels are ASCII (PIL's default bitmap font has no CJK glyphs).
-"""
 from __future__ import annotations
 
 import io
@@ -73,11 +61,6 @@ def _label(draw: ImageDraw.ImageDraw, x: int, y: int, text: str, palette) -> Non
 
 def render_wave_live(samples: list[tuple[float, tuple, tuple]],
                      dark: bool = False) -> bytes:
-    """Scrolling time/strength chart of actual output (last ~5 s).
-
-    ``samples``: [(t, segs_a4, segs_b4)] oldest-first, one entry per output
-    tick (100 ms, four 25 ms strength segments).  Right edge = now.
-    """
     palette = _palette(dark)
     width, lane_h, gap, margin = 720, 52, 10, 4
     height = margin + 2 * (lane_h + gap) + 2
@@ -101,7 +84,7 @@ def render_wave_live(samples: list[tuple[float, tuple, tuple]],
         _label(draw, x0 + 4, y0 + 2, f"{name} STR 0-100", palette)
         for t, segs_a, segs_b in samples:
             if t < t0 or t > now:
-                continue  # skip pre-recorded batch samples not yet played
+                continue
             segs = segs_a if idx == 0 else segs_b
             bar_w = max(1, int((x1 - x0) / (window / 0.1) * 0.8))
             for i, v in enumerate(segs):
@@ -120,14 +103,12 @@ def render_wave_live(samples: list[tuple[float, tuple, tuple]],
 
 PRESSURE_WINDOW_S = 60.0
 PRESSURE_MIN_KPA = 0.0
-PRESSURE_MAX_KPA = 60.0  # same scale as the DG-Lab app
+PRESSURE_MAX_KPA = 60.0
 PRESSURE_COLORS = [(59, 130, 208), (214, 69, 65), (72, 170, 96), (160, 90, 200)]
 
 
 def render_pressure_chart(series: list[tuple[str, list[tuple[float, float]]]],
                           dark: bool = False) -> bytes:
-    """Rolling pressure line chart (0-60 kPa).  ``series`` items:
-    (label, samples) with samples = [(monotonic_t, kPa), ...]."""
     palette = _palette(dark)
     width, height, margin = 720, 230, 34
     now = time.monotonic()

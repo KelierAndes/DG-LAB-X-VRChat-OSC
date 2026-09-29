@@ -1,7 +1,3 @@
-"""Integration tests for the local V4/V3 relay servers + device extensions.
-
-Run:  python -m unittest discover -s tests
-"""
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +51,6 @@ class OvcWaveTests(unittest.TestCase):
         frames = resolve_wave_frames(OvcWaveform.ALARM, "OVC_1")
         self.assertTrue(frames)
         self.assertEqual(frames[0][8:16].lower(), "64646464")
-        # OVC names do not exist in the Coyote table.
         with self.assertRaises(KeyError):
             resolve_wave_frames(OvcWaveform.ALARM, "COYOTE_030")
         self.assertEqual(resolve_wave_frames(CONTINUOUS, "OVC_1")[0][8:].lower(), "64646464")
@@ -78,7 +73,7 @@ class BleFrameTests(unittest.TestCase):
 
     def test_ovc_b2(self):
         frame = build_ovc_b2(10, 20)
-        self.assertEqual(len(frame), 24)  # 0xB2 + 21-byte fixed body + A + B
+        self.assertEqual(len(frame), 24)
         self.assertEqual(frame[0], 0xB2)
         self.assertEqual(frame[22], 10)
         self.assertEqual(frame[23], 20)
@@ -92,12 +87,11 @@ class BleFrameTests(unittest.TestCase):
         self.assertEqual(frame[0], 0x50)
         self.assertEqual(frame[2], 0xD0)
         reset = build_bmtr_66(reset_pressure=True)
-        self.assertEqual(len(reset), 13)  # 0x66 + 9x00 + orientation + int16
+        self.assertEqual(len(reset), 13)
         self.assertEqual(reset[0], 0x66)
         self.assertEqual(reset[11:13], b"\x00\x02")
 
     def test_bmtr_pressure_parse(self):
-        # pressure 7.9 kPa -> int16 LE 790 = 0x0316
         data = bytearray(15)
         data[0] = 0xD0
         data[8:10] = (790).to_bytes(2, "little")
@@ -107,7 +101,7 @@ class BleFrameTests(unittest.TestCase):
     def test_ovc_buttons(self):
         data = bytearray(16)
         data[0] = 0xD0
-        data[2:4] = (0b101 << 8).to_bytes(2, "big")  # bits 8 and 10
+        data[2:4] = (0b101 << 8).to_bytes(2, "big")
         self.assertEqual(parse_ovc_buttons(data), [8, 10])
 
 
@@ -127,22 +121,17 @@ class RelayV4Tests(unittest.TestCase):
             await client.connect()
             self.assertTrue(client.state.client_id, "hello/targetId missing")
 
-            # Fake app (被控方) joins the controller.
             async with websockets.connect(f"ws://127.0.0.1:{port}/?tid={client.state.client_id}") as app:
-                # hello for the app
                 hello = json.loads(await asyncio.wait_for(app.recv(), 5))
                 self.assertEqual(hello["type"], "hello")
                 app_id = hello["clientId"]
                 attached = json.loads(await asyncio.wait_for(app.recv(), 5))
                 self.assertEqual(attached["type"], "controller_attached")
 
-                # controller sees client_attached
                 await asyncio.sleep(0.2)
                 self.assertTrue(client.state.paired)
                 self.assertEqual(client.state.target_id, app_id)
 
-                # App reports a devices.snapshot event; controller state updates.
-                # App-side payloads travel inside a {"type":"message"} envelope.
                 await app.send(json.dumps({
                     "type": "message",
                     "data": {"t": "ev", "ev": "devices.snapshot",
@@ -156,14 +145,10 @@ class RelayV4Tests(unittest.TestCase):
                 self.assertEqual(slot.strength["A"], 3)
                 self.assertEqual(slot.battery, 55)
 
-                # Controller op reaches the app; app's resp resolves the future.
-                # (client_attached also triggers an automatic devices.get -
-                # answer it, then read the actual device.op frame.)
                 fut = asyncio.ensure_future(client.add_intensity("A", 5))
                 got_frame = json.loads(await asyncio.wait_for(app.recv(), 5))
                 while not (got_frame["data"].get("m") == "device.op"
                            and got_frame["data"]["data"].get("t") == 3):
-                    # answer devices.get / skip wave batches (t=0)
                     result = ({"devices": []}
                               if got_frame["data"].get("m") == "devices.get"
                               else {"type": 0, "reason": "completed"})
@@ -182,7 +167,6 @@ class RelayV4Tests(unittest.TestCase):
                 }))
                 await asyncio.wait_for(fut, 5)
 
-            # App left: controller should see client_disconnected.
             await asyncio.sleep(0.4)
             self.assertFalse(client.state.paired)
             await client.disconnect()
@@ -218,13 +202,11 @@ class RelayV3Tests(unittest.TestCase):
                 await asyncio.sleep(0.2)
                 self.assertTrue(client.state.paired)
 
-                # set_strength -> app receives strength-1+2+35
                 await client.set_strength("A", 35)
                 frame = json.loads(await asyncio.wait_for(app.recv(), 5))
                 self.assertEqual(frame["type"], "msg")
                 self.assertEqual(frame["message"], "strength-1+2+35")
 
-                # app strength feedback -> controller slot updates
                 await app.send(json.dumps({
                     "type": "msg", "clientId": client.state.client_id,
                     "targetId": app_bind["clientId"],
@@ -235,7 +217,6 @@ class RelayV3Tests(unittest.TestCase):
                 self.assertEqual(slot.strength, {"A": 11, "B": 7})
                 self.assertEqual(slot.strength_limit, {"A": 100, "B": 35})
 
-                # waveform: 1 s duration -> packets arrive within ~2 s
                 from dglab.official_waveforms import COYOTE_WAVEFORMS, CoyoteWaveform
                 await client.send_wave("A", CoyoteWaveform.BUBBLE, 1.0)
                 got_pulse = None
@@ -248,7 +229,6 @@ class RelayV3Tests(unittest.TestCase):
                 frames = json.loads(got_pulse.split(":", 1)[1])
                 self.assertTrue(all(len(f) == 16 for f in frames))
 
-            # App gone -> controller unpaired (break / client_disconnected).
             await asyncio.sleep(0.4)
             self.assertFalse(client.state.paired)
             await client.disconnect()

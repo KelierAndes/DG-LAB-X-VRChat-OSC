@@ -1,4 +1,3 @@
-"""Multi-device BLE tests (mocked BleakClient), per-family OSC inputs, charts."""
 from __future__ import annotations
 
 import asyncio
@@ -16,8 +15,6 @@ from vrc.osc_bridge import OscBridge, OscConfig
 
 
 class FakeBleakClient:
-    """Stands in for bleak.BleakClient - no Bluetooth hardware involved."""
-
     instances: dict[str, "FakeBleakClient"] = {}
 
     def __init__(self, address: str, disconnected_callback=None, **kwargs):
@@ -28,7 +25,6 @@ class FakeBleakClient:
         FakeBleakClient.instances[address] = self
 
     def simulate_drop(self) -> None:
-        """Simulate an unexpected link loss (bleak invokes the callback)."""
         if self.disconnected_callback:
             self.disconnected_callback(self)
 
@@ -48,10 +44,7 @@ class FakeBleakClient:
         self.written.append((char, bytes(data)))
 
 
-
 def free_udp_port() -> int:
-    """An unused local UDP port - the fixed 9001 may be taken by a running
-    DGLabOSC.exe instance, which made these OSC tests flaky."""
     import socket as _socket
 
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
@@ -88,19 +81,16 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ble.state.slots["addr-coyote"].type, "COYOTE_030")
         self.assertEqual(self.ble.state.slots["addr-ovc"].type, "OVC_1")
 
-        # per-slot strength routing
         await self.ble.set_strength("A", 30, slot_id="addr-ovc")
         await self.ble.set_strength("A", 11, slot_id="addr-coyote")
         self.assertEqual(self.ble.state.slots["addr-ovc"].strength["A"], 30)
         self.assertEqual(self.ble.state.slots["addr-coyote"].strength["A"], 11)
 
-        # per-slot wave routing
         await self.ble.set_wave("A", "BUBBLE", slot_id="addr-coyote")
         await self.ble.set_wave("A", "ALARM", slot_id="addr-ovc")
         self.assertEqual(len(self.ble.sessions["addr-coyote"]._cycles["A"].frames), 2)
         self.assertTrue(len(self.ble.sessions["addr-ovc"]._cycles["A"].frames) >= 1)
 
-        # both writers produce B0 frames with the correct layout
         await asyncio.sleep(0.25)
         for address, expected_head in (("addr-coyote", 0xB0), ("addr-ovc", 0xB0)):
             client = FakeBleakClient.instances[address]
@@ -109,14 +99,12 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
             frame = b0s[-1]
             self.assertEqual(len(frame), 20)
             if address == "addr-ovc":
-                self.assertEqual(bytes(frame[1:8]), bytes(7))  # OVC layout: 7x00
+                self.assertEqual(bytes(frame[1:8]), bytes(7))
 
-        # emergency stops every device
         await self.ble.emergency_stop()
         self.assertEqual(self.ble.state.slots["addr-ovc"].strength["A"], 0)
         self.assertEqual(self.ble.state.slots["addr-ovc"].strength["B"], 0)
 
-        # disconnect one, the other stays
         await self.ble.disconnect("addr-coyote")
         self.assertEqual(set(self.ble.sessions), {"addr-ovc"})
         self.assertEqual(self.ble.state.status_text, "已连接 1 台设备")
@@ -124,7 +112,6 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_wave_continuity_and_strength_ack_flow(self):
         await self.ble.connect("addr-c", "coyote_v3")
         session = self.ble.sessions["addr-c"]
-        # auto-CONTINUOUS on connect: strength is effective without sending a wave
         self.assertTrue(session._cycles["A"].frames)
         self.assertTrue(session._cycles["B"].frames)
 
@@ -133,9 +120,7 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
         client = FakeBleakClient.instances["addr-c"]
 
         rhythm = {f.lower() for f in COYOTE_WAVEFORMS[CoyoteWaveform.RHYTHM]["raw"]}
-        steady = bytes.fromhex("2828282864646464")  # CONTINUOUS lane for channel B
-        # wave keeps looping well past one cycle (13 frames = 1.3 s);
-        # B0 carries A (RHYTHM) + B (CONTINUOUS) — compare channel lanes.
+        steady = bytes.fromhex("2828282864646464")
         await asyncio.sleep(0.5)
         b0s = [d for _c, d in client.written if d[0] == 0xB0]
         self.assertTrue(len(b0s) >= 4)
@@ -143,10 +128,8 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(1.2)
         b0s = [d for _c, d in client.written if d[0] == 0xB0]
         self.assertTrue(len(b0s) >= 12)
-        # pattern repeats: A-lane frames stay within the wave length
         self.assertTrue(all(b[4:12].hex() in rhythm for b in b0s))
 
-        # strength change -> B0 with method 0b11 (absolute) for channel A
         await self.ble.set_strength("A", 30, slot_id="addr-c")
         await asyncio.sleep(0.15)
         b0s = [d for _c, d in client.written if d[0] == 0xB0]
@@ -157,7 +140,6 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
         seq = frame[1] >> 4
         self.assertEqual(seq > 0, True)
 
-        # device echoes B1 -> lock released -> second change also applies
         echo = bytes([0xB1, seq, 30, 0])
         self.ble._on_notify(session, None, echo)
         self.assertEqual(session._awaiting_seq, 0)
@@ -180,14 +162,12 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
                 raise OSError("transient radio hiccup")
             await original(char, data, response=response)
 
-        client.write_gatt_char = flaky  # type: ignore[method-assign]
+        client.write_gatt_char = flaky
         await asyncio.sleep(1.0)
-        # the loop must have continued past the three failed ticks
         self.assertTrue(len(client.written) >= 5, len(client.written))
 
     async def test_battery_and_pressure_notify(self):
         await self.ble.connect("addr-bmtr", "bmtr")
-        # the keepalive task re-sends the pressure-enable command
         self.assertIsNotNone(self.ble.sessions["addr-bmtr"].writer_task)
 
         session = self.ble.sessions["addr-bmtr"]
@@ -200,7 +180,7 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
         notify_cb = client.notifies[V3_NOTIFY]
         data = bytearray(15)
         data[0] = 0xD0
-        data[8:10] = (1704).to_bytes(2, "little")  # 17.04 kPa
+        data[8:10] = (1704).to_bytes(2, "little")
         notify_cb(None, data)
         self.assertAlmostEqual(self.ble.state.slots["addr-bmtr"].pressure, 17.04)
 
@@ -244,17 +224,14 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
         assert ("set", "A", "coyote-1") in calls, calls
         assert ("set", "A", "ovc-1") in calls, calls
         assert ("set", "B", "ovc-1") in calls, calls
-        # the second coyote must never receive family inputs
         assert not any(c[2] == "coyote-2" for c in calls), calls
 
     async def test_wave_direct_and_step_inputs(self):
-        """波形跳变: the Int wave param selects a waveform directly (index
-        into 静默/持续/官方波形), the step param moves one waveform up/down."""
         from vrc.osc_bridge import wave_order
 
         order = wave_order("COYOTE")
         assert order[0] == SILENT and order[1] == CONTINUOUS
-        assert len(order) == 26  # 静默 + 持续 + 24 official
+        assert len(order) == 26
         assert wave_order("OVC")[2:] == [w.value for w in OvcWaveform]
 
         state = EngineState(backend="v4", paired=True, connected=True)
@@ -288,16 +265,12 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
             from pythonosc.udp_client import SimpleUDPClient
 
             sender = SimpleUDPClient("127.0.0.1", port)
-            # direct jump: index 1 -> 持续
             sender.send_message("/avatar/parameters/DGLabWaveA", [1])
             await asyncio.sleep(0.3)
-            # stepper: from 持续 (index 1) +1 -> first official waveform
             sender.send_message("/avatar/parameters/DGLabWaveStepA", [1])
             await asyncio.sleep(0.3)
-            # stepper backwards: back to 持续
             sender.send_message("/avatar/parameters/DGLabWaveStepA", [-1])
             await asyncio.sleep(0.3)
-            # stepper 0 is a no-op
             sender.send_message("/avatar/parameters/DGLabWaveStepA", [0])
             await asyncio.sleep(0.3)
         finally:
@@ -306,10 +279,9 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
         assert waves[0] == ("A", CONTINUOUS), waves
         assert waves[1] == ("A", order[2]), waves
         assert waves[2] == ("A", CONTINUOUS), waves
-        assert len(waves) == 3, waves  # the 0 step changed nothing
+        assert len(waves) == 3, waves
 
     async def test_fire_parameter_is_trigger(self):
-        """开火参数为触发式: True 起爆, False 停止 (而非单次脉冲)."""
         state = EngineState(backend="v4", paired=True, connected=True)
         state.slots["coyote-1"] = Slot(slot_id="coyote-1", type="COYOTE_030")
 

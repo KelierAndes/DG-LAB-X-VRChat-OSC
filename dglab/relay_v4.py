@@ -1,19 +1,3 @@
-"""Local Socket V4 relay server (局域网中继).
-
-Faithful asyncio/websockets port of DG-Lab's official reference relay
-``dglab-websocket-server/v4-server.ts``:
-
-* Any path may upgrade; query ``tid``/``targetId`` marks the connection as an
-  App (被控方), otherwise it is a controller.
-* Every connection gets ``{"type":"hello","clientId":"<8-hex>"}``.
-* App with unknown controller → ``error controller_not_found`` + close 4001.
-* Pairing notifies both sides (``client_attached`` / ``controller_attached``).
-* ``{"type":"message","clientId":<target>,"data":…}`` is routed: controller
-  → app strips ``clientId``; app → controller stamps the source ``clientId``.
-* ``ping`` → ``pong`` (ts).  ``heartbeat`` broadcast every 30 s.
-* A controller with no app attached is closed after 5 min (``idle_timeout``,
-  close 4002).  Controller disconnect kicks all apps with close 4000.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -41,8 +25,6 @@ def _is_record(value: Any) -> bool:
 
 
 class RelayV4Server:
-    """Local Socket V4 relay (1 controller : N apps)."""
-
     def __init__(self, host: str = "0.0.0.0", port: int = 9998, events: StateEvents | None = None):
         self.host = host
         self.port = port
@@ -56,7 +38,6 @@ class RelayV4Server:
         self._heartbeat_task: asyncio.Task | None = None
         self._closing = False
 
-    # ------------------------------------------------------------------ util
     def log(self, msg: str) -> None:
         self.events.emit("log", f"[中继V4] {msg}")
 
@@ -72,7 +53,6 @@ class RelayV4Server:
         except Exception:
             pass
 
-    # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         if self._server is not None:
             return
@@ -97,7 +77,6 @@ class RelayV4Server:
                 pass
         self.log("V4 中继已停止")
 
-    # ----------------------------------------------------------- connection
     async def _handler(self, ws: Any) -> None:
         path = getattr(getattr(ws, "request", None), "path", "/") or "/"
         query = parse_qs(urlsplit(path).query)
@@ -190,7 +169,6 @@ class RelayV4Server:
                 controller, {"type": "message", "clientId": sender_id, "data": data}
             )
 
-    # ------------------------------------------------------------- lifecycle
     def _start_idle(self, controller_id: str) -> None:
         self._cancel_idle(controller_id)
         loop = asyncio.get_running_loop()

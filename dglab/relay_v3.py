@@ -1,22 +1,3 @@
-"""Local Socket V3 relay server (局域网中继).
-
-Faithful asyncio/websockets port of DG-Lab's official reference relay
-``dglab-websocket-server/v3-server.ts``:
-
-* Every connection gets a UUID ``clientId`` and a ``bind`` frame with
-  ``message:"targetId"``.  A connection whose path/query carries
-  ``targetId``/``tid`` (or path tail) joins that controller directly and both
-  sides receive the ``bind`` ``"200"`` frame.
-* Envelope ``{"type","clientId","targetId","message"}``; errors 401/400/402/
-  403/404/406 as in the official server.
-* Controller types 1/2/3 → ``strength-<ch>+<mode>+<value>``; type 4 with
-  ``clear`` → ``clear-<ch>``, otherwise absolute strength; ``clientMsg``
-  waveforms are split into packets (1 packet/s, wave time × 10 frames) and
-  forwarded as ``pulse-<ch>:[...]``.
-* App reports (``feedback…`` / ``strength…``) are forwarded to the
-  controller; ``heartbeat`` every 60 s; either side disconnecting notifies
-  the other with ``break``/``209``.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +16,7 @@ from .state import StateEvents
 HEARTBEAT_INTERVAL = 60.0
 IDLE_TIMEOUT = 5 * 60.0
 PULSE_REPLACE_DELAY = 0.15
-DEFAULT_PULSE_DURATION = 5  # seconds
+DEFAULT_PULSE_DURATION = 5
 DEFAULT_SENDS_PER_SECOND = 1
 CLOSE_INVALID_TARGET_ID = 4001
 
@@ -43,14 +24,12 @@ _FRAME_RE = re.compile(r"^[0-9a-fA-F]{16}$")
 
 
 class RelayV3Server:
-    """Local Socket V3 relay (1 controller : 1 app)."""
-
     def __init__(self, host: str = "0.0.0.0", port: int = 9999, events: StateEvents | None = None):
         self.host = host
         self.port = port
         self.events = events or StateEvents()
         self._server: Any = None
-        self._connections: dict[str, Any] = {}  # id -> ws
+        self._connections: dict[str, Any] = {}
         self._ws_to_id: dict[Any, str] = {}
         self._web_to_app: dict[str, str] = {}
         self._app_to_web: dict[str, str] = {}
@@ -58,7 +37,6 @@ class RelayV3Server:
         self._pulse_tasks: dict[str, asyncio.Task] = {}
         self._heartbeat_task: asyncio.Task | None = None
 
-    # ------------------------------------------------------------------ util
     def log(self, msg: str) -> None:
         self.events.emit("log", f"[中继V3] {msg}")
 
@@ -72,7 +50,6 @@ class RelayV3Server:
     def _send_nowait(self, ws: Any, payload: dict) -> None:
         asyncio.get_running_loop().create_task(self._send(ws, payload))
 
-    # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         if self._server is not None:
             return
@@ -99,7 +76,6 @@ class RelayV3Server:
                 pass
         self.log("V3 中继已停止")
 
-    # ----------------------------------------------------------- connection
     async def _handler(self, ws: Any) -> None:
         path = getattr(getattr(ws, "request", None), "path", "/") or "/"
         split = urlsplit(path)
@@ -185,7 +161,6 @@ class RelayV3Server:
             return
         await self._forward(ws, _type, client_id, target_id, message)
 
-    # -------------------------------------------------------------- handlers
     def _parse(self, raw: Any) -> tuple[Any, str, str, str, dict] | None:
         try:
             parsed = json.loads(raw)
@@ -229,7 +204,7 @@ class RelayV3Server:
         if channel is None:
             await self._error_to(client_id, target_id, "406")
             return
-        send_type = route_type - 1  # V3 app: 0/1/2 = down/up/set
+        send_type = route_type - 1
         strength = _as_int(extra.get("strength"), 0) if route_type == 3 else 1
         text = f"strength-{channel[1]}+{send_type}+{strength}"
         sent = await self._send_to(target_id, {
@@ -336,7 +311,6 @@ class RelayV3Server:
         if not sent:
             await self._error_to(client_id, target_id, "404")
 
-    # ------------------------------------------------------------- pairing
     def _pair(self, web_id: str, app_id: str) -> str:
         if web_id == app_id:
             return "401"
@@ -373,7 +347,6 @@ class RelayV3Server:
     def _is_available_target(self, client_id: str) -> bool:
         return client_id in self._connections and not self._is_bound(client_id)
 
-    # ------------------------------------------------------------- timers
     def _start_idle(self, client_id: str) -> None:
         self._cancel_idle(client_id)
         loop = asyncio.get_running_loop()
@@ -408,7 +381,6 @@ class RelayV3Server:
         except asyncio.CancelledError:
             pass
 
-    # ------------------------------------------------------------- closing
     def _on_close(self, client_id: str) -> None:
         found = client_id in self._connections
         for w, i in list(self._ws_to_id.items()):
@@ -440,7 +412,6 @@ class RelayV3Server:
                 asyncio.get_running_loop().create_task(paired_ws.close(1000, "partner_disconnected"))
             self.log(f"{client_id} 断开，已通知配对方 {paired_id}")
 
-    # -------------------------------------------------------------- helpers
     async def _send_to(self, client_id: str, payload: dict) -> bool:
         ws = self._connections.get(client_id)
         if ws is None:
@@ -464,7 +435,6 @@ class RelayV3Server:
 
 
 def _normalize_channel(value: Any, default: int | None) -> tuple[str, int] | None:
-    """Returns (letter for pulse frames, number for strength/clear frames)."""
     normalized = value if value is not None else default
     if normalized in (1, "1", "A", "a"):
         return "A", 1

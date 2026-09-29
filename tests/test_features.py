@@ -1,4 +1,3 @@
-"""Tests for the continuous-wave model, fire, LED, flip and button bindings."""
 from __future__ import annotations
 
 import asyncio
@@ -24,33 +23,28 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
 
         from dglab.official_waveforms import COYOTE_WAVEFORMS, CoyoteWaveform
         await client.set_wave("A", CoyoteWaveform.BUBBLE, slot_id="s1")
 
         pulses = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
         clears = [f for f in sent if f["data"].get("m") == "device.op.clear"]
-        # switch must NOT clear (clear wipes channel intensity on the App);
-        # it replaces the in-flight batch with im=true instead.
         self.assertEqual(len(clears), 0)
         self.assertEqual(len(pulses), 1)
-        self.assertEqual(pulses[0]["t"], 0)  # AppendPulseData
+        self.assertEqual(pulses[0]["t"], 0)
         self.assertEqual(pulses[0]["s"], "s1")
-        self.assertEqual(pulses[0]["c"], 0)  # channel A
-        self.assertEqual(pulses[0]["im"], True)  # replaces in-flight batch
-        self.assertEqual(len(pulses[0]["v"]), 10)  # 1 s batch (larger stall)
-        self.assertEqual(pulses[0]["d"], 1000)  # batch play-out duration
+        self.assertEqual(pulses[0]["c"], 0)
+        self.assertEqual(pulses[0]["im"], True)
+        self.assertEqual(len(pulses[0]["v"]), 10)
+        self.assertEqual(pulses[0]["d"], 1000)
         self.assertEqual(pulses[0]["v"][0], COYOTE_WAVEFORMS[CoyoteWaveform.BUBBLE]["raw"][0])
 
-        # projected monitor samples for the whole batch
         self.assertGreaterEqual(len(client.monitors["s1"].samples), 10)
         _t, a, b = client.monitors["s1"].samples[0]
         self.assertEqual(len(a), 4)
-        self.assertEqual(b, (0, 0, 0, 0))  # channel B idle
+        self.assertEqual(b, (0, 0, 0, 0))
 
-        # switching to 静默 swaps in the zero-strength wave (session keeps
-        # flowing so the App's intensity state persists)
         await client.clear_wave("A", slot_id="s1")
         sent.clear()
         await client._wave_tick()
@@ -58,11 +52,9 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
                       if f["data"].get("m") == "device.op" and f["data"]["data"].get("c") == 0]
         self.assertTrue(silent_ops)
         for frame in silent_ops[-1]["v"]:
-            self.assertEqual(frame[8:], "00000000")  # zero strength
+            self.assertEqual(frame[8:], "00000000")
 
     async def test_wave_tick_tops_up_before_deadline(self):
-        """The feeder must chain batches on the play-out deadline: continuous
-        timeline, no dry spells (the App zeroes intensity when it dries)."""
         client = SocketV4Client(events=StateEvents())
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "client_attached", "clientId": "app"})
@@ -72,14 +64,12 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
-        await client._wave_tick()  # initial fill
+        client._send_raw = fake_send
+        await client._wave_tick()
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
-        self.assertEqual(len(ops), 2)  # both channels
-        self.assertNotIn("im", ops[0])  # plain top-up, no replace
+        self.assertEqual(len(ops), 2)
+        self.assertNotIn("im", ops[0])
 
-        # projections chain on the deadline: the last projected sample of the
-        # batch sits one frame-interval before its play-out deadline
         samples = client.monitors["s1"].samples
         deadline = max(client._play_deadline[("s1", "A")],
                        client._play_deadline[("s1", "B")])
@@ -87,10 +77,9 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(deadline, last + 0.1, delta=0.001)
 
         sent.clear()
-        await client._wave_tick()  # queue still deep -> nothing new
+        await client._wave_tick()
         self.assertEqual([f for f in sent if f["data"].get("m") == "device.op"], [])
 
-        # force the deadline to be nearly due -> exactly one 10-frame batch
         client._play_deadline[("s1", "A")] = 0.0
         await client._wave_tick()
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"
@@ -110,17 +99,16 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
         await client.fire(slot_id="s1", duration_s=1.0)
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
         temps = [o for o in ops if o.get("t") == 4]
-        self.assertEqual(len(temps), 2)  # both channels
-        self.assertEqual(temps[0]["v"], 100)  # capped by channel limit
+        self.assertEqual(len(temps), 2)
+        self.assertEqual(temps[0]["v"], 100)
         self.assertEqual(temps[1]["v"], 35)
         self.assertEqual(temps[0]["d"], 1000)
 
     async def test_add_intensity_plain_ops(self):
-        """Intensity ops must be plain (im/p get coalesced by the App)."""
         client = SocketV4Client(events=StateEvents())
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "client_attached", "clientId": "app"})
@@ -130,7 +118,7 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
         await client.add_intensity("A", 2, slot_id="s1")
         op = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"][-1]
         self.assertNotIn("im", op)
@@ -138,7 +126,6 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(op["v"], 2)
 
     async def test_ovc_strength_quantized_to_10(self):
-        """The App rejects OVC strength changes not multiples of 10."""
         client = SocketV4Client(events=StateEvents())
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "client_attached", "clientId": "app"})
@@ -149,14 +136,13 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
-        await client.set_strength("A", 5, slot_id="s1")  # 5 -> rounds to 10
+        client._send_raw = fake_send
+        await client.set_strength("A", 5, slot_id="s1")
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
         self.assertEqual(ops[0]["t"], 3)
         self.assertEqual(ops[0]["v"], 10)
 
     async def test_replace_devices_merges_props(self):
-        """A descriptor-only devices.get response must not wipe battery."""
         client = SocketV4Client(events=StateEvents())
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "client_attached", "clientId": "app"})
@@ -182,9 +168,7 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
-        # t=7 v>0 is rejected by the App (invalid_operate) - strength MUST go
-        # through relative AddIntensity (t=3) for every device type.
+        client._send_raw = fake_send
         await client.set_strength("A", 5, slot_id="s1")
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
         self.assertEqual(len(ops), 1)
@@ -192,13 +176,9 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ops[0]["v"], 5)
         self.assertNotIn("im", ops[0])
         self.assertNotIn("p", ops[0])
-        # the local mirror is never written: App reports stay authoritative
         self.assertEqual(client.state.slots["s1"].strength["A"], 0)
 
     async def test_set_strength_does_not_fight_app_limit(self):
-        """The App's adaptive limit (comfortLimit) may exceed our cap; the
-        delta must never be computed against our own clamp (that actively
-        pulled the channel DOWN and looked like the App zeroing it)."""
         client = SocketV4Client(events=StateEvents())
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "client_attached", "clientId": "app"})
@@ -210,14 +190,13 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
         await client.set_strength("A", 121, slot_id="s1")
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
         self.assertEqual(ops[0]["t"], 3)
-        self.assertEqual(ops[0]["v"], 1)  # 121 - App-reported 120
+        self.assertEqual(ops[0]["v"], 1)
 
     async def test_output_ops_reject_bmtr_slot(self):
-        """灵猫 is sensor-only: output ops must never reach its slot."""
         client = SocketV4Client(events=StateEvents())
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "client_attached", "clientId": "app"})
@@ -230,23 +209,19 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
         with self.assertRaises(RuntimeError):
             await client.set_strength("A", 10, slot_id="bm")
         with self.assertRaises(RuntimeError):
             await client.set_wave("A", "continuous", slot_id="bm")
         with self.assertRaises(RuntimeError):
             await client.fire(slot_id="bm")
-        # the wave feeder never opens a session for the sensor slot either
         await client._wave_tick()
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"
                and f["data"]["data"].get("s") == "bm"]
         self.assertEqual(ops, [])
 
     async def test_single_sided_patches_keep_accumulated_state(self):
-        """The App alternates props-only and slotState-only patches (真机日志
-        13:20:20/13:20:40).  A missing half must never wipe the accumulated
-        half - that zeroed the mirror display and flapped the shown limit."""
         client = SocketV4Client(events=StateEvents())
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "client_attached", "clientId": "app"})
@@ -266,22 +241,20 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
             patch([{"slotId": "s1", "props": {"intensityA": v}}])
         slot = client.state.slots["s1"]
         self.assertEqual(slot.strength["A"], 8)
-        self.assertEqual(slot.strength_limit["A"], 100)  # kept, not defaulted
-        self.assertEqual(slot.battery, 77)  # kept
+        self.assertEqual(slot.strength_limit["A"], 100)
+        self.assertEqual(slot.battery, 77)
 
-        # comfortLimit patch carries ONLY slotState - strength must survive
         patch([{"slotId": "s1", "slotState": {"channelA": {
             "comfortLimit": {"totalIncr": 1}, "intensityMax": 101}}}])
         slot = client.state.slots["s1"]
-        self.assertEqual(slot.strength["A"], 8)  # NOT zeroed
+        self.assertEqual(slot.strength["A"], 8)
         self.assertEqual(slot.strength_limit["A"], 101)
         self.assertEqual(slot.battery, 77)
 
-        # next intensity patch - the comfort limit must survive too
         patch([{"slotId": "s1", "props": {"intensityA": 9}}])
         slot = client.state.slots["s1"]
         self.assertEqual(slot.strength["A"], 9)
-        self.assertEqual(slot.strength_limit["A"], 101)  # NOT defaulted to 200
+        self.assertEqual(slot.strength_limit["A"], 101)
         self.assertEqual(slot.battery, 77)
 
 
@@ -306,10 +279,9 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
     async def test_unexpected_drop_marks_for_reconnect(self):
         await self.ble.connect("addr-c", "coyote_v3")
         FakeBleakClient.instances["addr-c"].simulate_drop()
-        self.assertNotIn("addr-c", self.ble.sessions)  # zombie session removed
-        self.assertIn("addr-c", self.ble.dropped)  # reconnect loop will retry
+        self.assertNotIn("addr-c", self.ble.sessions)
+        self.assertIn("addr-c", self.ble.dropped)
 
-        # deliberate disconnect must NOT mark for reconnect
         await self.ble.connect("addr-c", "coyote_v3")
         await self.ble.disconnect("addr-c")
         self.assertNotIn("addr-c", self.ble.dropped)
@@ -327,10 +299,10 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
         bmtr_client = FakeBleakClient.instances["addr-bmtr"]
         flips = [d for _c, d in bmtr_client.written if d[0] == 0x66]
         self.assertEqual(len(flips), 1)
-        self.assertEqual(flips[0][10], 3)  # orientation byte
+        self.assertEqual(flips[0][10], 3)
         await self.ble.bmtr_flip(slot_id="addr-bmtr")
         flips = [d for _c, d in bmtr_client.written if d[0] == 0x66]
-        self.assertEqual(flips[-1][10], 1)  # toggled back
+        self.assertEqual(flips[-1][10], 1)
 
     async def test_button_event_emitted(self):
         await self.ble.connect("addr-ovc", "ovc")
@@ -339,7 +311,7 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
         session = self.ble.sessions["addr-ovc"]
         data = bytearray(16)
         data[0] = 0xD0
-        data[2:4] = (1 << 13).to_bytes(2, "big")  # A button
+        data[2:4] = (1 << 13).to_bytes(2, "big")
         self.ble._on_notify(session, None, data)
         self.assertEqual(events, [("addr-ovc", 13)])
 
@@ -348,7 +320,7 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
         session = self.ble.sessions["addr-bmtr"]
         data = bytearray(17)
         data[0] = 0xD0
-        data[8:10] = (1234).to_bytes(2, "little")  # 12.34 kPa
+        data[8:10] = (1234).to_bytes(2, "little")
         self.ble._on_notify(session, None, data)
         self.assertAlmostEqual(self.ble.state.slots["addr-bmtr"].pressure, 12.34)
         stats = session.__dict__["notify_stats"]
@@ -356,7 +328,7 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry[0], 1)
         self.assertEqual(entry[1], bytes(data))
         self.ble._log_d0_stats(session)
-        self.assertEqual(stats[uuid][0], 0)  # per-second counter reset
+        self.assertEqual(stats[uuid][0], 0)
 
 
 class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
@@ -371,7 +343,7 @@ class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
             async def fake_fire(slot_id=None, duration_s=None):
                 fired.append(slot_id)
 
-            engine.fire = fake_fire  # type: ignore[method-assign]
+            engine.fire = fake_fire
             engine.config.setdefault("ble", {})["ovc_buttons"] = {"13": "fire"}
             engine._on_ovc_button("addr-ovc", 13)
             await asyncio.sleep(0.3)
@@ -381,8 +353,6 @@ class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
-    """Engine-level regressions: fire routing to V4 and 归零 -> 静默."""
-
     def _engine(self):
         import os
         import tempfile
@@ -397,8 +367,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
         return engine
 
     async def test_fire_reaches_v4_backend(self):
-        """Engine.fire must call backend.fire with duration_s (the V4
-        backend signature) - a name mismatch made the button dead."""
         engine = self._engine()
         try:
             calls: list[tuple] = []
@@ -418,8 +386,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine.stop()
 
     async def test_fire_restores_original_wave(self):
-        """Fire temporarily switches a silent channel to 持续, then must
-        restore the ORIGINAL wave afterwards (not stay on 持续)."""
         engine = self._engine()
         try:
             waves: list[str] = []
@@ -438,11 +404,10 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine._selected_wave["A"] = SILENT
             engine._selected_wave["B"] = "some_wave"
             await engine.fire(slot_id="s1", duration_s=0.05)
-            # silent A goes 持续 -> back to 静默; B keeps its own wave untouched
-            self.assertEqual(waves[0], CONTINUOUS)  # burst wave for silent A
-            self.assertEqual(waves[-1], SILENT)  # restored afterwards
+            self.assertEqual(waves[0], CONTINUOUS)
+            self.assertEqual(waves[-1], SILENT)
             self.assertEqual(engine._selected_wave["A"], SILENT)
-            self.assertNotIn(CONTINUOUS, waves[1:])  # nothing left on 持续
+            self.assertNotIn(CONTINUOUS, waves[1:])
         finally:
             engine.stop()
 
@@ -461,7 +426,7 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
                                                             "channelB": {"intensityMax": 200}}}])
             engine._backend = backend
 
-            engine.config["fire_strength"] = 0  # 0 = follow max_strength (100)
+            engine.config["fire_strength"] = 0
             await engine.fire(slot_id="s1", duration_s=0.01)
             self.assertEqual(seen[-1], 100)
 
@@ -469,7 +434,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             await engine.fire(slot_id="s1", duration_s=0.01)
             self.assertEqual(seen[-1], 45)
 
-            # never above the device's own channel limit
             backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030",
                                               "slotState": {"channelA": {"intensityMax": 30},
                                                             "channelB": {"intensityMax": 30}}}])
@@ -480,8 +444,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine.stop()
 
     async def test_fire_hold_start_stop(self):
-        """Trigger fire: press raises both channels, release restores strength
-        and the original waveform."""
         engine = self._engine()
         try:
             added: list[tuple] = []
@@ -506,20 +468,17 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
 
             await engine.fire_start(slot_id="s1")
             self.assertIn("s1", engine._fire_holds)
-            # relative raise from the App-reported mirror: A 3->20, B 0->20
             self.assertEqual(sorted(added), [("A", 17), ("B", 20)])
             self.assertEqual(waves[0], CONTINUOUS)
 
             added.clear()
-            # the App reports the raised values before the release restores
             backend.state.slots["s1"].strength = {"A": 20, "B": 20}
             await engine.fire_stop(slot_id="s1")
             self.assertNotIn("s1", engine._fire_holds)
             self.assertEqual(sorted(added), [("A", -17), ("B", -20)])
-            self.assertEqual(waves[-1], SILENT)  # original wave restored
+            self.assertEqual(waves[-1], SILENT)
             self.assertEqual(engine._selected_wave["A"], SILENT)
 
-            # release without a press is a no-op (no restore ops)
             added.clear()
             await engine.fire_stop(slot_id="s1")
             self.assertEqual(added, [])
@@ -527,9 +486,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine.stop()
 
     async def test_fire_hold_restores_when_app_never_reports(self):
-        """Reproduces the field bug: the App often still reports the OLD
-        strength when the button is released.  The restore must undo the
-        applied delta instead of computing 0 and leaving the burst on."""
         engine = self._engine()
         try:
             added: list[tuple] = []
@@ -555,15 +511,12 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sorted(added), [("A", 46), ("B", 50)])
 
             added.clear()
-            # the mirror never moves (no App report at all) - the release must
-            # still send the inverse of what was applied
             await engine.fire_stop(slot_id="s1")
             self.assertEqual(sorted(added), [("A", -46), ("B", -50)])
         finally:
             engine.stop()
 
     async def test_direct_strength_set(self):
-        """直接设置强度 goes through the same absolute path as OSC."""
         engine = self._engine()
         try:
             ops: list[tuple] = []
@@ -578,11 +531,10 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine._backend = backend
             engine.config["max_strength"] = 100
             await engine.set_strength("A", 40, slot_id="s1")
-            self.assertEqual(ops, [("A", 34)])  # delta from App-reported 6
-            # the safety cap still applies
+            self.assertEqual(ops, [("A", 34)])
             ops.clear()
             await engine.set_strength("A", 500, slot_id="s1")
-            self.assertEqual(ops, [("A", 94)])  # capped at max_strength 100
+            self.assertEqual(ops, [("A", 94)])
         finally:
             engine.stop()
 
@@ -612,8 +564,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine.stop()
 
     async def test_add_strength_sends_pure_relative(self):
-        """+/- buttons must send the raw relative step (App applies its own
-        limit and reports back); engine must not touch the mirror itself."""
         engine = self._engine()
         try:
             adds: list[tuple] = []
@@ -628,13 +578,11 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine._backend = backend
             await engine.add_strength("A", 1, slot_id="s1")
             self.assertEqual(adds, [("A", 1, "s1")])
-            # mirror untouched: still the App-reported value
             self.assertEqual(backend.state.slots["s1"].strength["A"], 5)
 
-            # safety cap uses the App-reported value, not a local target
             backend.state.slots["s1"].strength["A"] = engine.config["max_strength"]
             await engine.add_strength("A", 1, slot_id="s1")
-            self.assertEqual(len(adds), 1)  # suppressed at the cap
+            self.assertEqual(len(adds), 1)
         finally:
             engine.stop()
 
@@ -648,7 +596,7 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             ])
             engine._backend = backend
             self.assertEqual(engine.resolve_slot(output_only=True), "s1")
-            self.assertEqual(engine.resolve_slot(), "bm")  # unfiltered still sees it
+            self.assertEqual(engine.resolve_slot(), "bm")
         finally:
             engine.stop()
 
@@ -664,11 +612,11 @@ class ResetStrengthTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
         await client.reset_intensity("A", slot_id="s1")
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
         self.assertEqual(len(ops), 1)
-        self.assertEqual(ops[0]["t"], 7)  # SetIntensity 0
+        self.assertEqual(ops[0]["t"], 7)
         self.assertEqual(ops[0]["s"], "s1")
         self.assertEqual(ops[0]["c"], 0)
 
@@ -678,10 +626,9 @@ class ResetStrengthTests(unittest.IsolatedAsyncioTestCase):
             ble = _make_client()
             await ble.connect("addr-c", "coyote_v3")
             await ble.set_strength("A", 30, slot_id="addr-c")
-            await asyncio.sleep(0.15)  # writer applies 30 and device confirms
+            await asyncio.sleep(0.15)
             await ble.set_strength("A", 0, slot_id="addr-c")
             self.assertEqual(ble.sessions["addr-c"]._targets["A"], 0)
-            # writer applies the zero on the next tick
             await asyncio.sleep(0.15)
             client = FakeBleakClient.instances["addr-c"]
             applied = [d for _c, d in client.written
@@ -705,14 +652,12 @@ class SavedDeviceTests(unittest.IsolatedAsyncioTestCase):
         engine.start()
         try:
             with unittest.mock.patch("dglab.ble.BleakClient", FakeBleakClient):
-                # ble_connect remembers the device
                 await engine.ble_connect("addr-c", "coyote_v3")
                 saved = engine.saved_device_list()
                 self.assertEqual(len(saved), 1)
                 self.assertEqual(saved[0]["address"], "addr-c")
                 self.assertEqual(saved[0]["kind"], "coyote_v3")
 
-                # simulate a drop, then reconnect via the saved record
                 await engine._backend.disconnect("addr-c")
                 await engine.ble_reconnect_saved("addr-c")
                 self.assertIn("addr-c", engine._backend.sessions)
@@ -730,7 +675,6 @@ class FrameLogTests(unittest.IsolatedAsyncioTestCase):
         client.events.on("frame_log", lambda d, f: frames.append((d, f)))
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "ping"})
-        # hello logged, ping filtered
         self.assertEqual([d for d, _f in frames], ["<<"])
         self.assertEqual(frames[0][1]["type"], "hello")
 

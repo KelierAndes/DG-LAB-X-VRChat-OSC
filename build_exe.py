@@ -1,12 +1,3 @@
-"""Build the packaged exe WITHOUT losing the runtime files.
-
-PyInstaller's COLLECT step removes the whole ``dist/DGLabOSC`` directory, which
-also deletes the user's ``config.json`` (saved devices, thresholds) and
-``dglab_osc.log`` sitting next to the exe.  This wrapper backs them up first and
-restores them after the build.
-
-Usage:  python build_exe.py [--keep-log]
-"""
 from __future__ import annotations
 
 import shutil
@@ -20,14 +11,14 @@ RUNTIME_FILES = ("config.json", "dglab_osc.log")
 
 
 def main() -> int:
-    keep_log = "--keep-log" in sys.argv
+    keep_log = "--drop-log" not in sys.argv
     backup_dir = ROOT / "_research" / "_runtime_backup"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     saved: dict[str, Path] = {}
     for name in RUNTIME_FILES:
         if name == "dglab_osc.log" and not keep_log:
-            continue  # the log is diagnostics only; skip unless asked
+            continue
         src = APP_DIR / name
         if src.is_file():
             dst = backup_dir / name

@@ -1,9 +1,3 @@
-"""Application engine: config, background asyncio loop and unified commands.
-
-The engine owns whichever backend is active (Socket V4, Socket V3 or BLE)
-plus the VRChat OSC bridge, and exposes thread-safe command methods that the
-WinUI 3 frontend can call from the UI thread.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +24,6 @@ from vrc.osc_bridge import OscBridge, OscConfig
 
 
 def _base_dir() -> str:
-    """Directory for user files: next to the exe when frozen, else project dir."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
@@ -41,10 +34,10 @@ class Config(dict):
         "v4_url": DEFAULT_V4_RELAY,
         "v3_url": DEFAULT_V3_RELAY,
         "wave_duration_s": 10.0,
-        "max_strength": 100,  # cap (safety)
-        "strength_step": 1,  # +/- button step
+        "max_strength": 100,
+        "strength_step": 1,
         "fire_duration_s": 1.0,
-        "fire_strength": 0,  # 一键开火强度 (0 = 跟随最大强度上限)
+        "fire_strength": 0,
         "ble": {
             "soft_limit_a": 200,
             "soft_limit_b": 200,
@@ -52,7 +45,6 @@ class Config(dict):
             "freq_balance_b": 0,
             "strength_balance_a": 0,
             "strength_balance_b": 0,
-            # 负鼠物理按键绑定: bit -> action (none/fire/zap_a/zap_b/estop)
             "ovc_buttons": {
                 "0": "none", "1": "none", "2": "none",
                 "8": "none", "9": "none", "10": "none", "11": "none",
@@ -67,7 +59,7 @@ class Config(dict):
     }
 
     def __init__(self, path: str | None = None):
-        super().__init__(json.loads(json.dumps(self.DEFAULTS)))  # deep copy
+        super().__init__(json.loads(json.dumps(self.DEFAULTS)))
         self.path = path or os.path.join(_base_dir(), "config.json")
         self.load()
 
@@ -123,8 +115,6 @@ class Engine:
 
         self._backend: SocketV4Client | SocketV3Client | BleClient | None = None
         self._relay: RelayV4Server | RelayV3Server | None = None
-        # Bookkeeping of the selected wave per channel; every connection
-        # starts on the silent (zero-strength) wave, matching the backends.
         self._selected_wave: dict[str, CoyoteWaveform | str] = {
             "A": SILENT,
             "B": SILENT,
@@ -133,10 +123,8 @@ class Engine:
         self._fire_holds: dict[str, dict] = {}
         self.events.on("ovc_button", self._on_ovc_button)
         self.events.on("frame_log", lambda d, f: self.log_frame(d, f))
-        # Every log event (engine + backends) lands in the log file.
         self.events.on("log", self._file_only)
 
-    # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -184,12 +172,10 @@ class Engine:
             self.loop.call_soon_threadsafe(self.loop.stop)
 
     def submit(self, coro) -> Future:
-        """Run a coroutine on the engine loop; returns a concurrent Future."""
         if not self.loop:
             raise RuntimeError("engine not started")
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
-    # ----------------------------------------------------------------- log
     def _log(self, msg: str) -> None:
         self.events.emit("log", msg)
 
@@ -200,7 +186,6 @@ class Engine:
             pass
 
     def log_frame(self, direction: str, frame: dict) -> None:
-        """Verbose protocol frame logging (socket mode)."""
         if not self.config.get("log_frames"):
             return
         try:
@@ -211,7 +196,6 @@ class Engine:
             text = text[:300] + f"...(+{len(text) - 300})"
         self._log(f"{direction} {text}")
 
-    # ---------------------------------------------------------------- state
     def get_state(self) -> EngineState:
         if self._backend is not None:
             return self._backend.state
@@ -221,7 +205,6 @@ class Engine:
     def backend_kind(self) -> str:
         return self._backend.state.backend if self._backend else "none"
 
-    # ------------------------------------------------------------- backends
     async def _disconnect_backend(self) -> None:
         if self._backend is not None:
             try:
@@ -252,7 +235,6 @@ class Engine:
             raise
 
     async def connect_v4_local(self, port: int | None = None) -> None:
-        """Start the built-in V4 relay on this machine and connect to it."""
         await self._disconnect_backend()
         port = int(port or self.config["relay"]["v4_port"])
         relay = RelayV4Server(port=port, events=self.events)
@@ -276,7 +258,6 @@ class Engine:
             raise
 
     async def connect_v3_local(self, port: int | None = None) -> None:
-        """Start the built-in V3 relay on this machine and connect to it."""
         await self._disconnect_backend()
         port = int(port or self.config["relay"]["v3_port"])
         relay = RelayV3Server(port=port, events=self.events)
@@ -308,8 +289,6 @@ class Engine:
             self._relay = None
 
     async def ble_connect(self, address: str, kind: str = "coyote_v3") -> None:
-        """Connect one more BLE device; an existing BLE manager keeps its
-        sessions so multiple devices can stay connected simultaneously."""
         ble_cfg = self.config["ble"]
         if isinstance(self._backend, BleClient):
             client = self._backend
@@ -338,7 +317,6 @@ class Engine:
         if isinstance(self._backend, BleClient):
             await self._backend.disconnect(slot_id)
 
-    # ------------------------------------------------- saved devices (BLE)
     def saved_device_list(self) -> list[dict]:
         return list(self.config.get("saved_devices", []))
 
@@ -369,10 +347,6 @@ class Engine:
         raise RuntimeError(f"没有 {address} 的设备记录")
 
     async def _reconnect_loop(self) -> None:
-        """Session-centric auto reconnect: retry ONLY devices that were
-        BLE-connected in this run and dropped unexpectedly (BleClient.dropped).
-        A device the user never connected here - e.g. one being used through
-        the phone App right now - must not be BLE-grabbed behind their back."""
         last_attempt: dict[str, float] = {}
         try:
             while True:
@@ -403,15 +377,12 @@ class Engine:
     async def ble_scan(self, timeout: float = 6.0) -> list[dict]:
         return await BleClient.scan(timeout)
 
-    # ------------------------------------------------------------- commands
     def _require_backend(self):
         if self._backend is None:
             raise RuntimeError("没有已连接的设备")
         return self._backend
 
-    # ------------------------------------------------------ device routing
     def devices(self) -> list[dict]:
-        """All known devices: [{slot_id, name, type, family}]."""
         state = self.get_state()
         out = []
         for sid in sorted(state.slots):
@@ -426,11 +397,6 @@ class Engine:
 
     def resolve_slot(self, slot_id: str | None = None, family: str | None = None,
                      output_only: bool = False) -> str | None:
-        """Explicit slot, else first device of family, else first device.
-
-        ``output_only`` skips sensor-only devices (BMTR 灵猫) so output
-        commands never land on a device without output channels.
-        """
         state = self.get_state()
         if slot_id and slot_id in state.slots:
             return slot_id
@@ -444,15 +410,11 @@ class Engine:
         return None
 
     def _quantize_for_device(self, slot, value: int) -> int:
-        """OVC (负鼠) accepts strength changes only in multiples of 10."""
         if slot is not None and slot.type.upper().startswith("OVC"):
-            return int(value / 10.0 + 0.5) * 10  # round-half-up
+            return int(value / 10.0 + 0.5) * 10
         return value
 
     async def set_strength(self, channel: str, value: int, slot_id: str | None = None) -> None:
-        """Absolute strength (OSC path).  Socket V4 mirrors the App: the
-        delta is computed against the App-REPORTED intensity and the App
-        enforces its own limit - we never maintain strength ourselves."""
         backend = self._require_backend()
         limit = int(self.config["max_strength"])
         value = max(0, min(limit, int(value)))
@@ -473,13 +435,11 @@ class Engine:
             slot = backend.state.slots.get(sid) if sid else None
             if slot is None:
                 raise RuntimeError("V4 尚未接入设备")
-            # Pure relative op straight to the App - the App applies its own
-            # limit and reports the new value back (our state is a mirror).
             step = int(delta)
             if slot.type.upper().startswith("OVC"):
                 step = max(10, round(abs(delta) / 10.0) * 10) * (1 if delta > 0 else -1)
             if step > 0 and slot.strength.get(channel, 0) >= int(self.config["max_strength"]):
-                return  # App-reported strength already at the safety cap
+                return
             await backend.add_intensity(channel, step, slot_id=sid)
         elif isinstance(backend, SocketV3Client):
             await backend.add_strength(channel, delta)
@@ -490,7 +450,6 @@ class Engine:
         backend = self._require_backend()
         self._selected_wave[channel] = name
         if isinstance(backend, SocketV4Client):
-            # V4 uses the continuous sender: switch the looping waveform.
             await backend.set_wave(channel, name, slot_id=self.resolve_slot(slot_id, output_only=True))
         elif isinstance(backend, SocketV3Client):
             await backend.send_wave(
@@ -500,8 +459,6 @@ class Engine:
             await backend.set_wave(channel, name, slot_id=self.resolve_slot(slot_id, output_only=True))
 
     async def reset_strength(self, channel: str, slot_id: str | None = None) -> None:
-        """一键归零: strength -> 0 AND switch the channel to the silent
-        (zero-strength) wave, so the channel is truly quiet immediately."""
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         if isinstance(backend, SocketV4Client):
@@ -513,12 +470,6 @@ class Engine:
         await self.set_wave(channel, SILENT, slot_id=sid)
 
     async def clear_wave(self, channel: str | None = None, slot_id: str | None = None) -> None:
-        """静默: switch the channel(s) to the silent (zero-strength) wave.
-
-        The wave session keeps flowing (so the App's intensity state
-        persists) while producing no output.  device.op.clear is reserved
-        for the emergency stop - it wipes the channel intensity.
-        """
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         for ch in ("A", "B"):
@@ -526,7 +477,6 @@ class Engine:
                 await self.set_wave(ch, SILENT, slot_id=sid)
 
     async def zap(self, channel: str, seconds: float = 1.0, slot_id: str | None = None) -> None:
-        """Short burst - implemented as a temporary intensity burst (fire)."""
         await self.fire(slot_id=slot_id, duration_s=seconds)
 
     async def emergency_stop(self) -> None:
@@ -534,9 +484,6 @@ class Engine:
         await backend.emergency_stop()
 
     def _fire_value(self, slot) -> int:
-        """Burst strength for 一键开火: the configured fire strength, or the
-        max-strength cap when unset (0).  Always bounded by the device's own
-        channel limits and quantized for the device type."""
         cap = int(self.config.get("fire_strength") or 0)
         if cap <= 0:
             cap = int(self.config["max_strength"])
@@ -550,11 +497,9 @@ class Engine:
         return max(1, cap)
 
     def _fire_waves(self, sid: str) -> dict[str, str]:
-        """Wave bookkeeping snapshot per channel (for fire restore)."""
         return {ch: str(self._selected_wave.get(ch) or SILENT) for ch in ("A", "B")}
 
     async def fire(self, slot_id: str | None = None, duration_s: float | None = None) -> None:
-        """一键开火 (脉冲式): temporary burst for the configured duration."""
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         if sid is None:
@@ -563,8 +508,6 @@ class Engine:
         state = self.get_state()
         slot = state.slots.get(sid)
         cap = self._fire_value(slot)
-        # Channels that were silent need a real wave for the burst - and must
-        # be restored to their ORIGINAL wave afterwards (not left on 持续).
         original = self._fire_waves(sid)
         switched = [ch for ch in ("A", "B") if original[ch] in ("", SILENT)]
         try:
@@ -585,14 +528,12 @@ class Engine:
                     pass
 
     async def fire_start(self, slot_id: str | None = None) -> None:
-        """触发式开火开始 (按下): raise both channels to the fire value and
-        hold until :meth:`fire_stop` (放开) or the safety timeout."""
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         if sid is None:
             raise RuntimeError("没有可用设备")
         if sid in self._fire_holds:
-            return  # already holding
+            return
         state = self.get_state()
         slot = state.slots.get(sid)
         value = self._fire_value(slot)
@@ -609,8 +550,6 @@ class Engine:
                 if hold["waves"][ch] in ("", SILENT):
                     await self.set_wave(ch, CONTINUOUS, slot_id=sid)
             if isinstance(backend, SocketV4Client):
-                # relative raise from the App-reported mirror (the App
-                # enforces its own limit and reports the result back)
                 for ch in ("A", "B"):
                     cur = slot.strength.get(ch, 0) if slot is not None else 0
                     if value > cur:
@@ -641,7 +580,6 @@ class Engine:
             pass
 
     async def fire_stop(self, slot_id: str | None = None) -> None:
-        """触发式开火结束 (放开): restore strength and the original waveform."""
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         hold = self._fire_holds.pop(sid, None)
@@ -650,12 +588,6 @@ class Engine:
         task = hold.get("task")
         if task is not None:
             task.cancel()
-        # Restore the original wave FIRST (stops the burst pattern), then the
-        # strength.  For V4 the raise travelled as a relative delta, so wait
-        # for the App to REPORT the raised value before computing the restore
-        # delta - waiting on ">= the pre-fire strength" never waits at all
-        # (the stale mirror already satisfies it) and the restore delta came
-        # out as 0, leaving the burst strength on the device.
         if isinstance(backend, SocketV4Client):
             raised = [
                 ch for ch in ("A", "B")
@@ -664,7 +596,7 @@ class Engine:
                 and self.get_state().slots[sid].strength.get(ch, 0)
                 > int(hold["strength"].get(ch, 0))
             ]
-            for _ in range(10 if raised else 0):  # up to ~1 s
+            for _ in range(10 if raised else 0):
                 await asyncio.sleep(0.1)
                 cur = self.get_state().slots.get(sid)
                 if cur is None:
@@ -691,8 +623,6 @@ class Engine:
                 cur = slot.strength.get(ch, 0) if slot is not None else 0
                 delta = int(hold["strength"].get(ch, 0)) - cur
                 if delta == 0:
-                    # The App never reported the raise in time - undo exactly
-                    # what we added so the burst value cannot stick.
                     delta = -int(hold["applied"].get(ch, 0))
                 if delta:
                     try:
@@ -726,7 +656,6 @@ class Engine:
             self._log("屏幕翻转目前仅支持蓝牙直连的灵猫")
 
     def wave_history(self, slot_id: str | None = None):
-        """WaveMonitor for a device (real-time chart source)."""
         backend = self._backend
         if backend is None:
             return None
@@ -761,7 +690,6 @@ class Engine:
             asyncio.run_coroutine_threadsafe(_run(), self.loop)
 
     async def reset_pressure(self, slot_id: str | None = None) -> None:
-        """BMTR (灵猫) BLE only: zero the pressure reading."""
         backend = self._require_backend()
         if isinstance(backend, BleClient):
             await backend.reset_pressure(slot_id=self.resolve_slot(slot_id, family="BMTR"))
@@ -773,7 +701,6 @@ class Engine:
         if isinstance(backend, SocketV4Client):
             backend.select_slot(slot_id)
 
-    # ------------------------------------------------------------------ OSC
     async def osc_start(self) -> None:
         if self.osc is None:
             self.osc = OscBridge(
@@ -795,7 +722,6 @@ class Engine:
 
 
 def local_lan_ip() -> str:
-    """Best-effort LAN address used in pairing QR codes."""
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -806,7 +732,7 @@ def local_lan_ip() -> str:
         s.close()
 
 
-FIRE_HOLD_MAX_S = 60.0  # stuck-trigger safety: never hold a burst forever
+FIRE_HOLD_MAX_S = 60.0
 
 
 __all__ = ["Config", "Engine", "local_lan_ip"]

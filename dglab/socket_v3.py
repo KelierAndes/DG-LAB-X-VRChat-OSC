@@ -1,25 +1,3 @@
-"""DG-Lab Socket V3 client (legacy official relay protocol).
-
-Wire protocol (from DG-Lab official opensource docs, ``dglab-bluetooth-protocol``
-socket/README.md and ``dglab-websocket-simple`` socket/v2/README.md):
-
-* All frames share the envelope ``{"type","clientId","targetId","message"}``
-  (max 1950 chars).
-* On connect the relay assigns our id: ``{"type":"bind","clientId":"<id>",
-  "targetId":"","message":"targetId"}``.  After the App scans the QR and
-  pairs, both sides receive ``message:"200"``.
-* Controller -> App (relayed as ``type:"msg"``):
-  - ``strength-<ch>+<mode>+<value>`` with channel 1=A/2=B, mode 0=down,
-    1=up, 2=set (0-200).  dglab-kit emits ``{"type":3,...}`` style frontend
-    frames that the relay converts; we speak the frontend dialect directly.
-  - waves: ``{"type":"clientMsg","channel":"A","time":<s>,
-    "message":"A:[\\"hex\\",...]"}``
-  - clear: ``{"type":4,"channel":<n>,"message":"clear"}``
-* App -> Controller: ``strength-<A>+<B>+<Amax>+<Bmax>`` feedback (the
-  dglab-kit SDK also accepts dashes - we accept both separators), and
-  ``feedback-<index>`` button events (0-4 channel A, 5-9 channel B).
-* Error/status codes: 200 ok, 209 peer gone, 400/401/402/404...
-"""
 from __future__ import annotations
 
 import asyncio
@@ -43,14 +21,11 @@ CHANNEL_NUM = {"A": 1, "B": 2}
 
 
 def build_v3_qr(relay_url: str, target_id: str) -> str:
-    """QR content for the Socket V2/V3 entrance (official format)."""
     base = relay_url.rstrip("/")
     return QR_TEMPLATE.format(url=f"{base}/{target_id}")
 
 
 class SocketV3Client:
-    """Asyncio client for the official Socket V3 relay protocol."""
-
     def __init__(self, relay_url: str = DEFAULT_V3_RELAY, events: StateEvents | None = None,
                  qr_base: str | None = None):
         self.relay_url = relay_url
@@ -62,7 +37,6 @@ class SocketV3Client:
         self._reader_task: asyncio.Task | None = None
         self._closing = False
 
-    # ------------------------------------------------------------------ util
     def _log(self, msg: str) -> None:
         self.events.emit("log", f"[V3] {msg}")
 
@@ -88,7 +62,6 @@ class SocketV3Client:
             self.events.emit("frame_log", ">>", payload)
         await self._ws.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
-    # ------------------------------------------------------------ connection
     async def connect(self) -> None:
         if self._ws is not None:
             return
@@ -104,7 +77,6 @@ class SocketV3Client:
         while not self.state.client_id and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.05)
         if not self.state.client_id:
-            # Some community relays expect the client to register first.
             fallback_id = str(uuid.uuid4())
             self._log("服务器未自动分配 ID，发送注册请求…")
             await self._send(
@@ -137,7 +109,7 @@ class SocketV3Client:
 
     async def _reader(self) -> None:
         try:
-            async for raw in self._ws:  # type: ignore[union-attr]
+            async for raw in self._ws:
                 try:
                     frame = json.loads(raw)
                 except Exception:
@@ -153,7 +125,6 @@ class SocketV3Client:
                 self.state = EngineState(backend="v3", status_text="连接已断开")
                 self._publish()
 
-    # ----------------------------------------------------------- frame logic
     def _handle_frame(self, frame: dict) -> None:
         if frame.get("type") not in ("ping", "pong", "heartbeat"):
             self.events.emit("frame_log", "<<", frame)
@@ -164,7 +135,6 @@ class SocketV3Client:
 
         if ftype == "bind":
             if isinstance(client_id, str) and (target_id in ("", None)):
-                # Initial assignment: our own id.
                 self.state.client_id = client_id
                 self._publish()
             elif (
@@ -215,7 +185,6 @@ class SocketV3Client:
             self._publish()
             return
 
-    # ------------------------------------------------------------ public ops
     async def set_strength(self, channel: str, value: int) -> None:
         if not self.state.paired:
             raise RuntimeError("V3 尚未与 App 完成配对")
@@ -230,7 +199,6 @@ class SocketV3Client:
         )
 
     async def add_strength(self, channel: str, delta: int) -> None:
-        """step-style adjust (relay converts to repeated +/- commands)."""
         if not self.state.paired:
             raise RuntimeError("V3 尚未与 App 完成配对")
         ctype = 2 if delta >= 0 else 1
@@ -248,7 +216,6 @@ class SocketV3Client:
         if not self.state.paired:
             raise RuntimeError("V3 尚未与 App 完成配对")
         frames = resolve_wave_frames(waveform, "COYOTE_030")
-        # Envelope limit is 1950 chars; 100 frames is the documented maximum.
         frames = frames[:100]
         payload = json.dumps(frames, ensure_ascii=False, separators=(",", ":"))
         await self._send(

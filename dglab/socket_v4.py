@@ -1,22 +1,3 @@
-"""DG-Lab Socket V4 client (DG-Lab 4.0 App "Socket V4" control entrance).
-
-Wire protocol (from DG-Lab official dglab-kit / dglab-kit-python, 2026):
-
-* Controller connects to a V4 relay, e.g. ``wss://trex.dungeon-lab.cn/v4``.
-  The relay answers ``{"type":"hello","clientId":"..."}`` - the ``clientId``
-  is this controller's ``targetId`` used in the pairing QR.
-* App connects to the relay with ``?tid=<targetId>``; the relay then sends
-  ``{"type":"client_attached","clientId":"<app-id>"}`` to the controller.
-* Application frames travel inside ``{"type":"message","clientId":<app>,
-  "data":{...}}`` envelopes.  ``data.t`` is ``req``/``resp``/``ev``.
-* RPC methods: ``devices.get``, ``ping``, ``device.op`` (t=0 AppendPulseData,
-  t=3 AddIntensity, t=4 SetTempIntensity, t=7 SetIntensity-0-only),
-  ``device.op.clear``.
-* Events: ``devices.snapshot``, ``devices.patch``, ``slots.patch`` (deep
-  merge by slotId), ``custom.action`` (App feedback button 0-9).
-* Controller must send ``{"type":"ping"}`` roughly every 2 s; three missed
-  ``pong`` frames mean the relay is gone.  Server close codes: 4000/4001/4002.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -45,30 +26,20 @@ ACTION_TEMP = 4
 ACTION_PULSE = 0
 
 CHANNELS = ("A", "B")
-# Continuous wave cadence (device-log verified): the App plays frames at
-# ~100 ms/frame and RESETS the channel intensity when the stream runs dry,
-# while oversized batches stall it (50-frame batches -> channelAStatus=0).
-# Feeding therefore uses small 10-frame (1 s) batches, topped up whenever
-# the projected play-out deadline nears - exactly real-time on average, so
-# the queue can neither run dry nor grow without bound.
 WAVE_TICK_S = 0.1
-WAVE_BATCH_FRAMES = 10  # 1 s per batch (larger batches stalled the App)
-WAVE_TOPUP_S = 0.6  # top up when < 0.6 s of frames remain queued
+WAVE_BATCH_FRAMES = 10
+WAVE_TOPUP_S = 0.6
 
 V4_QR_TEMPLATE = "https://dungeon-lab.cn/s/?v=1&action=socket&url={url}"
 
 
 def build_v4_qr(relay_url: str, target_id: str) -> str:
-    """QR content the DG-Lab 4.0 App scans (Socket V4 entrance)."""
     app_url = f"{relay_url.rstrip('/')}/?tid={target_id}"
     return V4_QR_TEMPLATE.format(url=quote(app_url, safe=""))
 
 
 def _merge_patch(current: Any, patch: Any) -> Any:
     if patch is None:
-        # An ABSENT section must never wipe the accumulated state - the App
-        # sends single-sided patches (props OR slotState), and treating the
-        # missing half as "replace with None" zeroed the mirror display.
         return copy.deepcopy(current)
     if not isinstance(current, dict) or not isinstance(patch, dict):
         return copy.deepcopy(patch)
@@ -89,38 +60,28 @@ def _request_id() -> str:
 
 
 class SocketV4Client:
-    """Asyncio client for the official Socket V4 relay protocol."""
-
     def __init__(self, relay_url: str = DEFAULT_V4_RELAY, events: StateEvents | None = None,
                  qr_base: str | None = None):
         self.relay_url = relay_url
-        # Base URL shown in the pairing QR (defaults to relay_url); used so a
-        # loopback-connected client can advertise its LAN address instead.
         self.qr_base = qr_base or relay_url
         self.events = events or StateEvents()
         self.state = EngineState(backend="v4")
 
-        self._ws: Any = None  # websockets async client connection
+        self._ws: Any = None
         self._reader_task: asyncio.Task | None = None
         self._ping_task: asyncio.Task | None = None
         self._closing = False
         self._missed_pongs = 0
 
-        self._clients: dict[str, dict] = {}  # app clientId -> {"devices": {slotId: dict}}
+        self._clients: dict[str, dict] = {}
         self._pending: dict[str, asyncio.Future] = {}
 
-        # Continuous wave model: the client appends WAVE_BATCH_FRAMES frames
-        # per device+channel whenever the projected play-out deadline nears
-        # (no one-shot tasks, no response-time tracking).
         self._cycles: dict[tuple[str, str], FrameCycle] = {}
         self.monitors: dict[str, WaveMonitor] = {}
         self._wave_task: asyncio.Task | None = None
-        # (slotId, channel) -> monotonic time when the App will have played
-        # every frame queued so far (projection used for top-up and chart).
         self._play_deadline: dict[tuple[str, str], float] = {}
         self._props_logged: set[str] = set()
 
-    # ------------------------------------------------------------------ util
     def _log(self, msg: str) -> None:
         self.events.emit("log", f"[V4] {msg}")
 
@@ -163,7 +124,6 @@ class SocketV4Client:
             raise RuntimeError("V4 尚未与 App/设备完成配对")
         return cid, sid
 
-    # --------------------------------------------------- continuous waves
     def _cycle(self, slot_id: str, channel: str) -> FrameCycle:
         return self._cycles.setdefault((slot_id, channel), FrameCycle())
 
@@ -171,7 +131,6 @@ class SocketV4Client:
         return self.monitors.setdefault(slot_id, WaveMonitor())
 
     def set_wave_frames(self, slot_id: str, channel: str, frames: list[str] | None) -> None:
-        """Select (frames) or silence (None -> SILENT zero-strength wave)."""
         if frames is None or not frames:
             from .waves import SILENT_FRAMES
             frames = list(SILENT_FRAMES)
@@ -185,14 +144,6 @@ class SocketV4Client:
         return [cycle.next_frame() for _ in range(count)]
 
     async def _wave_loop(self) -> None:
-        """Keep the App's wave queue fed without overfeeding it.
-
-        The App resets channel intensity whenever its wave stream runs dry
-        and stalls on oversized batches, so the sender tracks when the queued
-        frames will have played out (100 ms per frame) and appends one
-        10-frame batch just before that deadline - exactly real-time on
-        average, with the queue oscillating between 0.6 s and 1.6 s deep.
-        """
         try:
             while not self._closing:
                 await asyncio.sleep(WAVE_TICK_S)
@@ -214,15 +165,12 @@ class SocketV4Client:
         payload = {"s": sid, "c": CHANNELS.index(channel), "t": ACTION_PULSE,
                    "d": len(frames) * 100, "v": frames}
         if immediate:
-            payload["im"] = True  # replace the in-flight batch
+            payload["im"] = True
         await self._send_raw({
             "type": "message", "clientId": cid,
             "data": {"t": "req", "reqId": req_id, "m": "device.op",
                      "data": payload},
         })
-        # Projected play-out: frames play 100 ms apart starting when the
-        # queue drains (now for im batches).  Chaining on the deadline keeps
-        # the chart timeline continuous regardless of send jitter.
         key = (sid, channel)
         now = _time.monotonic()
         start = now if immediate else max(now, self._play_deadline.get(key, now))
@@ -238,23 +186,21 @@ class SocketV4Client:
         import time as _time
 
         if self._active_client_id() is None:
-            return  # not paired yet: don't advance cycles or spam errors
+            return
         now = _time.monotonic()
         for sid in list(self.state.slots):
             slot = self.state.slots.get(sid)
             if slot is None:
                 continue
             if not slot.is_output_device:
-                continue  # BMTR (灵猫) is a sensor: no wave session for it
+                continue
             for ch in ("A", "B"):
                 key = (sid, ch)
                 deadline = self._play_deadline.get(key)
                 if deadline is not None and deadline - now >= WAVE_TOPUP_S:
-                    continue  # the queue still has enough play-out time
+                    continue
                 cycle = self._cycles.get(key)
                 if cycle is None or not cycle.frames:
-                    # brand-new slot: start feeding the silent wave so the
-                    # intensity session exists from the very beginning
                     self.set_wave_frames(sid, ch,
                                          getattr(self, "_silent_frames", None))
                     cycle = self._cycle(sid, ch)
@@ -262,7 +208,6 @@ class SocketV4Client:
                 try:
                     await self._send_batch(sid, ch, frames)
                 except Exception as exc:
-                    # back off briefly so a broken link doesn't spam errors
                     self._play_deadline[key] = now + 0.5
                     self._log(f"{sid}/{ch} 波形批次发送失败: {exc!r}")
 
@@ -275,7 +220,6 @@ class SocketV4Client:
             self._wave_task.cancel()
             self._wave_task = None
 
-    # ------------------------------------------------------------ connection
     async def connect(self) -> None:
         if self._ws is not None:
             return
@@ -287,7 +231,6 @@ class SocketV4Client:
         self.state.connected = True
         self._reader_task = asyncio.create_task(self._reader())
         self._ping_task = asyncio.create_task(self._pinger())
-        # Wait for hello (targetId).
         deadline = time.monotonic() + 8
         while self.state.client_id == "" and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
@@ -297,8 +240,6 @@ class SocketV4Client:
         self.state.qr_text = build_v4_qr(self.qr_base, self.state.client_id)
         self._publish("等待 App 扫码接入…")
         self._log(f"targetId={self.state.client_id}")
-        # Default to the silent (zero-strength) wave: the wave session must
-        # keep flowing for intensity state to persist on the App side.
         from .waves import resolve_wave_frames as _rwf, SILENT as _SILENT
         self._silent_frames = _rwf(_SILENT, "COYOTE_030")
         await self.start_wave_loop()
@@ -335,7 +276,7 @@ class SocketV4Client:
 
     async def _reader(self) -> None:
         try:
-            async for raw in self._ws:  # type: ignore[union-attr]
+            async for raw in self._ws:
                 try:
                     frame = json.loads(raw)
                 except Exception:
@@ -366,14 +307,11 @@ class SocketV4Client:
             return
         data = frame.get("data")
         if isinstance(data, dict) and data.get("t") == "resp":
-            # Responses matter for diagnostics: log errors always, results
-            # under verbose frame logging (they are reflected in state too).
             if data.get("error"):
                 self.events.emit("log", f"[V4] 指令错误: {data.get('error')} req={data.get('reqId')}")
                 return
         self.events.emit("frame_log", direction, frame)
 
-    # ----------------------------------------------------------- frame logic
     def _handle_frame(self, frame: dict) -> None:
         self._log_frame("<<", frame)
         ftype = frame.get("type")
@@ -422,7 +360,6 @@ class SocketV4Client:
             return
         entry = self._clients.setdefault(cid, {"devices": {}})
 
-        # RPC response?
         if data.get("t") == "resp":
             req_id = data.get("requestId") or data.get("reqId")
             fut = self._pending.get(req_id)
@@ -458,11 +395,8 @@ class SocketV4Client:
                 self.events.emit("action", self.state.last_action)
                 self._publish()
 
-    # -------------------------------------------------------- device storage
     def _replace_devices(self, cid: str, devices: list) -> None:
         entry = self._clients.setdefault(cid, {"devices": {}})
-        # Merge: devices.get responses may carry descriptors WITHOUT props -
-        # wiping here would lose battery/strength reported by the snapshot.
         merged: dict[str, dict] = {}
         for dev in devices:
             if isinstance(dev, dict) and dev.get("slotId"):
@@ -506,9 +440,6 @@ class SocketV4Client:
         self._sync_state(cid)
 
     def _log_app_zero(self, sid: str, old_props: dict, new_props: dict) -> None:
-        """A props patch reported intensity 0 after a non-zero value.  That is
-        either the echo of our own 归零/reset op or a genuine App-side
-        adaptive reset - log it so every zero is attributable."""
         if not isinstance(old_props, dict) or not isinstance(new_props, dict):
             return
         for ch, key in (("A", "intensityA"), ("B", "intensityB")):
@@ -521,8 +452,6 @@ class SocketV4Client:
                 )
 
     def _debug_props_once(self, sid: str, slot: Slot) -> None:
-        # Battery is confirmed unavailable via Socket (App does not report
-        # it); keep the hook in case a future App version adds it.
         return
 
     def _sync_state(self, cid: str) -> None:
@@ -532,7 +461,6 @@ class SocketV4Client:
         if self.state.target_id != cid:
             if self.state.target_id:
                 return
-            # Devices arrived before the attach event (e.g. via request_devices).
             self.state.target_id = cid
         self.state.slots = {sid: self._slot_from_device(d) for sid, d in entry["devices"].items()}
         if self.state.active_slot not in self.state.slots:
@@ -541,14 +469,10 @@ class SocketV4Client:
             self._debug_props_once(sid, slot)
         self._publish()
 
-    # ------------------------------------------------------------------- RPC
     async def request_devices(self, cid: str) -> dict:
         try:
             result = await self._rpc(cid, "devices.get", timeout=2.0)
         except asyncio.TimeoutError:
-            # The App often answers with a devices.snapshot EVENT instead of
-            # a resp frame (device-log verified) - the devices are already
-            # applied by the event path, so don't hang or log an error.
             self._log("devices.get 无 resp 响应 (App 已改用 snapshot 事件上报)")
             return {}
         if isinstance(result, dict) and isinstance(result.get("devices"), list):
@@ -589,28 +513,17 @@ class SocketV4Client:
         try:
             await self._send_raw({"type": "message", "clientId": cid, "data": req})
             if not wait:
-                # device.op responses only arrive once the operation finishes;
-                # for interactive controls we do not block on them.
                 return None
             return await asyncio.wait_for(fut, timeout=timeout)
         finally:
             self._pending.pop(req_id, None)
 
-    # ------------------------------------------------------------------- ops
     def _check_output_slot(self, sid: str) -> None:
-        """BMTR (灵猫) is a sensor-only slot: never send output ops to it."""
         slot = self.state.slots.get(sid)
         if slot is not None and not slot.is_output_device:
             raise RuntimeError("灵猫 (BMTR) 是气压传感器，无输出通道")
 
     async def set_strength(self, channel: str, value: int, slot_id: str | None = None) -> None:
-        """Absolute strength via relative AddIntensity (t=3) - the only op
-        the App accepts for strength (t=7 v>0 returns invalid_operate).
-
-        The delta is computed against the App-REPORTED intensity mirror; the
-        mirror is never written locally, so App-side adaptive changes
-        (comfort limit / warmUp) stay authoritative and can't be fought.
-        """
         cid, sid = self._require_peer(slot_id)
         self._check_output_slot(sid)
         slot = self.state.slots.get(sid)
@@ -618,13 +531,11 @@ class SocketV4Client:
             raise RuntimeError(f"设备不存在: {sid}")
         value = max(0, min(200, int(value)))
         if slot.type.upper().startswith("OVC"):
-            # The App rejects OVC strength changes not multiples of 10.
-            value = int(value / 10.0 + 0.5) * 10  # round-half-up
+            value = int(value / 10.0 + 0.5) * 10
         delta = value - slot.strength.get(channel, 0)
         if delta:
             await self.add_intensity(channel, delta, slot_id=sid)
 
-    # ------------------------------------------------------------ public ops
     def select_slot(self, slot_id: str) -> None:
         if slot_id in self.state.slots:
             self.state.active_slot = slot_id
@@ -640,8 +551,6 @@ class SocketV4Client:
 
     async def set_intensity(self, channel: str, value: float,
                             slot_id: str | None = None) -> None:
-        """Absolute strength set (t=7).  The official doc restricts t=7 to 0
-        for Coyote, but some devices (OVC) only respond to absolute sets."""
         cid, sid = self._require_peer(slot_id)
         self._check_output_slot(sid)
         await self._operate(
@@ -673,7 +582,6 @@ class SocketV4Client:
         duration_s: float = 10.0,
         slot_id: str | None = None,
     ) -> None:
-        """Select a continuously-looping waveform (no one-shot task)."""
         cid, sid = self._require_peer(slot_id)
         self._check_output_slot(sid)
         device_type = "COYOTE_030"
@@ -683,9 +591,6 @@ class SocketV4Client:
         frames = resolve_wave_frames(waveform, device_type)
         self.set_wave_frames(sid, channel, frames)
         frames = self._slot_wave_frames(sid, device_type, channel) or frames
-        # Switch WITHOUT device.op.clear - the clear wipes the channel's
-        # intensity state on the App side.  im=true replaces the in-flight
-        # wave batch instead, so the new waveform starts immediately.
         try:
             await self._send_batch(sid, channel, frames, immediate=True)
         except Exception as exc:
@@ -693,7 +598,6 @@ class SocketV4Client:
         self._log(f"{sid} 通道 {channel} 波形切换: {len(frames)} 帧 (持续循环)")
 
     async def clear_wave(self, channel: str | None = None, slot_id: str | None = None) -> None:
-        """Silence a channel/device and flush the app's pulse queue."""
         cid, sid = self._require_peer(slot_id)
         if channel:
             self.set_wave_frames(sid, channel, None)
@@ -713,7 +617,6 @@ class SocketV4Client:
 
     async def fire(self, slot_id: str | None = None, duration_s: float = 1.0,
                    value: float | None = None) -> None:
-        """一键开火: temporary intensity burst on both channels."""
         cid, sid = self._require_peer(slot_id)
         self._check_output_slot(sid)
         duration_ms = max(1, round(duration_s * 1000))
@@ -727,7 +630,6 @@ class SocketV4Client:
         self._log(f"{sid} 一键开火 {duration_ms}ms (强度 {value or '通道上限'})")
 
     async def emergency_stop(self) -> None:
-        """Stop the wave sender, flush every queue, zero every channel."""
         await self.stop_wave_loop()
         self._play_deadline.clear()
         for (s, _c) in list(self._cycles):
@@ -735,7 +637,7 @@ class SocketV4Client:
         cid = self._active_client_id()
         if cid:
             try:
-                await self._rpc_or_clear(cid, None)  # clear EVERYTHING
+                await self._rpc_or_clear(cid, None)
             except Exception as exc:
                 self._log(f"急停清空队列失败: {exc!r}")
             for sid in list(self.state.slots):
@@ -746,7 +648,7 @@ class SocketV4Client:
                         )
                     except Exception as exc:
                         self._log(f"急停 {sid}/{ch} 清零失败: {exc!r}")
-        await self.start_wave_loop()  # keep monitoring/sending zeros
+        await self.start_wave_loop()
         self._log(f"急停已执行 ({len(self.state.slots)} 台设备强度清零 + 队列清空)")
 
     async def _rpc_or_clear(self, cid: str, data: dict | None) -> Any:
@@ -760,7 +662,6 @@ class SocketV4Client:
             await self._send_raw({"type": "message", "clientId": cid, "data": req})
             return await asyncio.wait_for(fut, timeout=RESPONSE_TIMEOUT)
         except asyncio.TimeoutError:
-            # The app stops sending wave data even without a response frame.
             self._log("清除指令等待响应超时 (队列清空指令已送达)")
             return None
         finally:
@@ -768,7 +669,6 @@ class SocketV4Client:
 
 
 def _find_battery(value: object, depth: int = 0) -> float | None:
-    """Recursively look for a battery-like numeric field in props."""
     if depth > 4:
         return None
     if isinstance(value, dict):
@@ -791,11 +691,6 @@ def _find_battery(value: object, depth: int = 0) -> float | None:
 
 
 def _apply_props(slot: Slot, props: dict) -> None:
-    """Extract known device props into typed fields.
-
-    Covers COYOTE_020/030 (e-stim), OVC_1 (负鼠振动, channel status is a
-    bool) and BMTR_1 (灵猫气压传感器).
-    """
     a = props.get("intensityA")
     b = props.get("intensityB")
     if isinstance(a, (int, float)):

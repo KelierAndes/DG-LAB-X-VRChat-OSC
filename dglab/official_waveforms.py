@@ -1,10 +1,3 @@
-# Coyote official waveform presets.
-#
-# Ported verbatim from DG-Lab official open-source project dglab-kit-python
-# (https://github.com/dungeonlab-open/dglab-kit-python, GPL-3.0).
-# Frame format: hex string of 8 bytes = [freq1..freq4][strength1..strength4],
-# one frame per ~100 ms, freq byte 10-240, strength byte 0-100.
-# Non-commercial use per DG-Lab protocol docs terms.
 
 from __future__ import annotations
 

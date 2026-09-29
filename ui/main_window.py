@@ -1,14 +1,3 @@
-"""WinUI 3 main window (win32more projection).
-
-UI thread runs the XamlApplication message pump; the engine runs on its own
-asyncio thread.  Updates cross threads through a queue drained by a
-DispatcherQueueTimer (delegates cannot safely be created off the UI thread).
-
-控制 page: one independent sub-page per device family (郊狼 / 负鼠 / 灵猫).
-Strength is adjusted with +/- buttons (socket V4's task-based ops make
-sliders unreliable); waveforms loop continuously; each page embeds a live
-scrolling output chart.
-"""
 from __future__ import annotations
 
 import io
@@ -48,7 +37,6 @@ from ui.charts import new_history
 FAMILIES = ("COYOTE", "OVC", "BMTR")
 FAMILY_LABELS = {"COYOTE": "郊狼 (电刺激)", "OVC": "负鼠 (振动)", "BMTR": "灵猫 (气压)"}
 
-# 负鼠物理按键位图 (官方协议 D0 按钮 stateset)。
 OVC_BUTTON_BITS = [
     (0, "SEL_1"), (1, "SEL_2"), (2, "HOME"),
     (8, "Up"), (9, "Down"), (10, "Left"), (11, "Right"),
@@ -80,7 +68,6 @@ XAML = """
 
   <Pivot Grid.Row="1" Margin="18,0,18,8">
 
-    <!-- ============================ 连接 ============================ -->
     <PivotItem Header="连接">
       <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="12" MaxWidth="720" HorizontalAlignment="Left">
@@ -156,7 +143,6 @@ XAML = """
       </ScrollViewer>
     </PivotItem>
 
-    <!-- ============================ 控制 ============================ -->
     <PivotItem Header="控制">
       <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
@@ -177,7 +163,6 @@ XAML = """
             <ComboBoxItem Content="灵猫 BMTR (气压)"/>
           </ComboBox>
 
-          <!-- ========== 郊狼独立控制页 ========== -->
           <StackPanel x:Name="PanelCtrlCoyote" Spacing="10">
             <ComboBox x:Name="DevCoyote" Header="选择郊狼设备" MinWidth="420" MaxWidth="640"
                       SelectionChanged="DevCoyote_Changed"/>
@@ -231,8 +216,6 @@ XAML = """
             <StackPanel Orientation="Horizontal" Spacing="8">
               <Button x:Name="BtnFireCoyote" Content="一键开火 (爆发)"
                       Style="{StaticResource AccentButtonStyle}" Click="BtnFireCoyote_Click"/>
-              <!-- Border, not Button: ButtonBase consumes PointerPressed, so a
-                   press-and-hold trigger must live on an element that doesn't. -->
               <Border x:Name="BtnFireHoldCoyote" Background="#2564CF" CornerRadius="4"
                       Padding="12,6" MinWidth="180"
                       PointerPressed="BtnFireHoldCoyote_Pressed"
@@ -250,7 +233,6 @@ XAML = """
                    HorizontalAlignment="Left"/>
           </StackPanel>
 
-          <!-- ========== 负鼠独立控制页 ========== -->
           <StackPanel x:Name="PanelCtrlOvc" Spacing="10" Visibility="Collapsed">
             <ComboBox x:Name="DevOvc" Header="选择负鼠设备" MinWidth="420" MaxWidth="640"
                       SelectionChanged="DevOvc_Changed"/>
@@ -325,7 +307,6 @@ XAML = """
                    HorizontalAlignment="Left"/>
           </StackPanel>
 
-          <!-- ========== 灵猫独立控制页 ========== -->
           <StackPanel x:Name="PanelCtrlBmtr" Spacing="10" Visibility="Collapsed">
             <ComboBox x:Name="DevBmtr" Header="选择灵猫设备" MinWidth="420" MaxWidth="640"
                       SelectionChanged="DevBmtr_Changed"/>
@@ -353,7 +334,6 @@ XAML = """
       </ScrollViewer>
     </PivotItem>
 
-    <!-- ============================ OSC ============================ -->
     <PivotItem Header="OSC">
       <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="10" MaxWidth="720" HorizontalAlignment="Left">
@@ -413,7 +393,6 @@ XAML = """
       </ScrollViewer>
     </PivotItem>
 
-    <!-- ============================ 日志 ============================ -->
     <PivotItem Header="日志">
       <StackPanel Spacing="8">
         <StackPanel Orientation="Horizontal" Spacing="8">
@@ -431,7 +410,6 @@ XAML = """
 
 
 def _wave_items(family: str = "COYOTE") -> list[tuple[str, str]]:
-    """(显示名, 波形标识) for one device family's dropdowns."""
     items: list[tuple[str, str]] = [("静默 (无输出)", SILENT)]
     if family == "OVC":
         table, enum_cls = OVC_WAVEFORMS, OvcWaveform
@@ -454,7 +432,6 @@ class MainWindow:
         self._saved_list: list[dict] = []
         self._last_qr = ""
         self._logs: list[str] = []
-        # Per-family device selection.
         self._fam_keys: dict[str, list[str]] = {f: [] for f in FAMILIES}
         self._fam_selected: dict[str, str | None] = {f: None for f in FAMILIES}
         self._fam_combos: dict[str, Any] = {}
@@ -482,27 +459,23 @@ class MainWindow:
         self._load_config_to_ui()
         self._apply_theme(initial=True)
 
-        # 引擎事件 -> UI 队列
         self.engine.events.on("state", self._on_engine_state)
         self.engine.events.on("log", self._on_engine_log)
         self.engine.events.on("saved_devices",
                               lambda devs: self.ui_queue.put(
                                   lambda: self._fill_saved_devices(devs)))
 
-        # UI 线程定时器: 消费后台线程投递的更新 + 图表渲染
         timer = self.window.DispatcherQueue.CreateTimer()
-        timer.Interval = TimeSpan(Duration=100_000)  # 100 ms
+        timer.Interval = TimeSpan(Duration=100_000)
         timer.IsRepeating = True
         timer.Tick += self._on_tick
         timer.Start()
 
         self.window.Activate()
 
-        # OSC 按配置自动启动
         if self.engine.config["osc"].get("enabled"):
             self._submit(self.engine.osc_start())
 
-    # ------------------------------------------------------------- helpers
     def _submit(self, coro) -> None:
         try:
             fut = self.engine.submit(coro)
@@ -523,7 +496,6 @@ class MainWindow:
             self._logs = self._logs[-400:]
         self.LogText.Text = "\n".join(self._logs)
 
-    # -------------------------------------------------------------- events
     def _on_tick(self, sender, args) -> None:
         while True:
             try:
@@ -534,8 +506,6 @@ class MainWindow:
         self._render_live_charts()
 
     def _render_live_charts(self) -> None:
-        """Refresh the scrolling output charts every timer tick (100 ms,
-        matching the App's own display cadence) plus the pressure chart."""
         now = time.monotonic()
         if now - self._last_wave_render >= 0.1:
             self._last_wave_render = now
@@ -568,7 +538,6 @@ class MainWindow:
         finally:
             self.engine.stop()
 
-    # --------------------------------------------------------- state apply
     def _apply_state(self, state: EngineState) -> None:
         self._updating_ui = True
         try:
@@ -600,7 +569,6 @@ class MainWindow:
             self.DeviceInfoText.Text = "\n".join(summaries) if summaries else "（无）"
             self.OscMapText.Text = self._osc_mapping_text(state)
 
-            # 灵猫气压历史 (折线图数据源, ~10Hz 采样)
             for sid, slot in state.slots.items():
                 if family_of(slot.type) != "BMTR" or slot.pressure is None:
                     continue
@@ -622,8 +590,6 @@ class MainWindow:
             self._updating_ui = False
 
     def _sync_wave_combos(self) -> None:
-        """Mirror engine._selected_wave into the wave dropdowns so engine-side
-        switches (一键归零 -> 静默, fire burst restore) show in the UI."""
         for fam, channel, box in (("COYOTE", "A", self.WaveA),
                                   ("COYOTE", "B", self.WaveB),
                                   ("OVC", "A", self.WaveAO),
@@ -631,7 +597,7 @@ class MainWindow:
             value = self.engine._selected_wave.get(channel)
             values = self._wave_values[fam]
             if value not in values:
-                continue  # e.g. a waveform name from the other family's set
+                continue
             index = values.index(value)
             if box.SelectedIndex != index:
                 box.SelectedIndex = index
@@ -649,7 +615,7 @@ class MainWindow:
             if self._fam_selected[fam] not in slot_ids:
                 self._fam_selected[fam] = slot_ids[0] if slot_ids else None
             if slot_ids:
-                combo.SelectedIndex = slot_ids.index(self._fam_selected[fam])  # type: ignore[arg-type]
+                combo.SelectedIndex = slot_ids.index(self._fam_selected[fam])
 
         sid = self._fam_selected[fam]
         slot = state.slots.get(sid) if sid else None
@@ -698,10 +664,7 @@ class MainWindow:
             lines.append(f"{FAMILY_LABELS.get(family, family)}: {params}")
         return "\n".join(lines) if lines else "（未接入设备）"
 
-    # ------------------------------------------------------ image / theme
     def _set_image_bytes(self, image, data: bytes) -> None:
-        """Display PNG bytes in an Image control (no URI caching)."""
-
         async def _run() -> None:
             try:
                 stream = InMemoryRandomAccessStream()
@@ -720,13 +683,9 @@ class MainWindow:
         asyncui.create_task(_run())
 
     def _apply_theme(self, initial: bool = False) -> None:
-        """Independent theme handling: force the element theme, an explicit
-        page background and the title-bar palette (never follows the system)."""
         from win32more.Microsoft.UI.Xaml.Media import SolidColorBrush
 
         try:
-            # The root element is self.ui (XamlLoader never binds x:Name on
-            # the root element, so self.RootGrid does not exist).
             self.ui.RequestedTheme = ElementTheme.Dark if self._dark else ElementTheme.Light
             self.BtnTheme.Content = "浅色模式" if self._dark else "深色模式"
         except Exception as exc:
@@ -764,7 +723,7 @@ class MainWindow:
             qr = qrcode.QRCode(box_size=8, border=2)
             qr.add_data(text)
             qr.make(fit=True)
-            img: Image.Image = qr.make_image(fill_color="black", back_color="white").convert("RGB")  # type: ignore[assignment]
+            img: Image.Image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
             buffer = io.BytesIO()
             img.save(buffer, "PNG")
             self._set_image_bytes(self.QrImage, buffer.getvalue())
@@ -790,7 +749,6 @@ class MainWindow:
         except Exception as exc:
             self._append_log(f"气压图渲染失败: {exc!r}")
 
-    # --------------------------------------------------------- UI builders
     def _fill_wave_box(self, box, family: str) -> None:
         self._updating_ui = True
         try:
@@ -801,7 +759,7 @@ class MainWindow:
                 item = ComboBoxItem()
                 item.Content = label
                 box.Items.Append(item)
-            box.SelectedIndex = 0  # default: 静默 (no output until picked)
+            box.SelectedIndex = 0
         finally:
             self._updating_ui = False
 
@@ -814,7 +772,7 @@ class MainWindow:
                     item = ComboBoxItem()
                     item.Content = name
                     box.Items.Append(item)
-                box.SelectedIndex = 1  # yellow
+                box.SelectedIndex = 1
         finally:
             self._updating_ui = False
 
@@ -896,7 +854,6 @@ class MainWindow:
         self.AutoReconnectCheck.IsChecked = bool(cfg.get("auto_reconnect", True))
         self._fill_saved_devices(cfg.get("saved_devices", []))
 
-        # 负鼠按键绑定
         bindings = cfg.get("ble", {}).get("ovc_buttons", {})
         for bit, combo in self._ovc_button_combos.items():
             action = bindings.get(str(bit), "none")
@@ -961,7 +918,6 @@ class MainWindow:
             if value:
                 osc[key] = value
 
-    # ------------------------------------------------------- button events
     def ModeBox_Changed(self, sender, args) -> None:
         mode = self.ModeBox.SelectedIndex
         self.PanelV4.Visibility = Visibility.Visible if mode == 0 else Visibility.Collapsed
@@ -1074,7 +1030,6 @@ class MainWindow:
         dev = self._scan_results[index]
         self._submit(self.engine.ble_connect(dev["address"], dev["kind"]))
 
-    # -------------------------------------------------- saved devices (BLE)
     def _fill_saved_devices(self, devices: list[dict] | None = None) -> None:
         devices = self.engine.saved_device_list() if devices is None else devices
         self._saved_list = list(devices)
@@ -1087,7 +1042,7 @@ class MainWindow:
                 try:
                     item.Tag = dev.get("address", "")
                 except Exception:
-                    pass  # Tag is unreliable in this projection; see below
+                    pass
                 self.SavedDeviceBox.Items.Append(item)
             if devices:
                 self.SavedDeviceBox.SelectedIndex = 0
@@ -1095,12 +1050,6 @@ class MainWindow:
             self._updating_ui = False
 
     def _selected_saved_address(self) -> str | None:
-        """Selected saved device address.
-
-        SelectedItem comes back as a bare IInspectable through this
-        projection (its ComboBoxItem.Tag cannot be read), which silently
-        disabled 重连/删除记录 - index into our own list instead.
-        """
         index = self.SavedDeviceBox.SelectedIndex
         if index is None or index < 0 or index >= len(self._saved_list):
             return None
@@ -1128,9 +1077,6 @@ class MainWindow:
             pass
 
     def Limits_Changed(self, sender, args) -> None:
-        """Apply 上限/开火强度/步长 immediately - typing a value must take
-        effect without a separate 保存配置 click (fire used to ignore the
-        edited 开火强度 until the app was closed)."""
         if self._updating_ui:
             return
         cfg = self.engine.config
@@ -1154,7 +1100,6 @@ class MainWindow:
 
         self._submit(_do())
 
-    # +/- 强度按钮
     def _step(self) -> int:
         try:
             return max(1, min(50, int(self.StepBox.Text)))
@@ -1189,7 +1134,6 @@ class MainWindow:
     def BtnPlusBO_Click(self, sender, args) -> None:
         self._adjust("OVC", "B", self._step())
 
-    # 直接设置强度 (与 OSC 绝对设定同一条路径: 内部按 App 回报值求差下发)
     def _apply_direct_strength(self, family: str, box_a, box_b) -> None:
         slot_id = self._fam_selected.get(family)
         for ch, box in (("A", box_a), ("B", box_b)):
@@ -1210,7 +1154,6 @@ class MainWindow:
     def BtnSetStrengthOvc_Click(self, sender, args) -> None:
         self._apply_direct_strength("OVC", self.SetStrengthAO, self.SetStrengthBO)
 
-    # 波形选择（选择即持续循环发送；选「静默」即停止）
     def _wave_for(self, family: str, box) -> str | None:
         index = box.SelectedIndex
         values = self._wave_values[family]
@@ -1240,7 +1183,6 @@ class MainWindow:
     def WaveBO_Changed(self, sender, args) -> None:
         self._on_wave_combo("OVC", "B", self.WaveBO)
 
-    # 波形跳变 (‹ / ›): 直接切换到上/下一个波形 (循环), 与下拉框跳变互补
     def _step_wave(self, family: str, channel: str, box, delta: int) -> None:
         values = self._wave_values.get(family) or []
         if not values:
@@ -1249,7 +1191,7 @@ class MainWindow:
         if index is None or index < 0:
             index = 0
         target = (index + delta) % len(values)
-        box.SelectedIndex = target  # triggers the combo handler -> set_wave
+        box.SelectedIndex = target
 
     def BtnWavePrevA_Click(self, sender, args) -> None:
         self._step_wave("COYOTE", "A", self.WaveA, -1)
@@ -1276,8 +1218,6 @@ class MainWindow:
         self._step_wave("OVC", "B", self.WaveBO, +1)
 
     def BtnWaveClearA_Click(self, sender, args) -> None:
-        # 归零: strength -> 0 AND switch to the silent wave (stops output
-        # immediately; the wave session keeps flowing so intensity works).
         self._submit(self.engine.reset_strength("A",
                                                slot_id=self._fam_selected["COYOTE"]))
 
@@ -1291,23 +1231,21 @@ class MainWindow:
     def BtnWaveClearBO_Click(self, sender, args) -> None:
         self._submit(self.engine.reset_strength("B", slot_id=self._fam_selected["OVC"]))
 
-    # 开火 / LED / 翻转 / 急停
     def BtnFireCoyote_Click(self, sender, args) -> None:
-        self.Limits_Changed(None, None)  # apply a just-typed 开火强度 first
+        self.Limits_Changed(None, None)
         self._submit(self.engine.fire(slot_id=self._fam_selected["COYOTE"]))
 
     def BtnFireOvc_Click(self, sender, args) -> None:
         self.Limits_Changed(None, None)
         self._submit(self.engine.fire(slot_id=self._fam_selected["OVC"]))
 
-    # 按住持续开火: PointerPressed 起爆, PointerReleased/CaptureLost/Exited 停止
     _FIRE_IDLE_BG = "#2564CF"
     _FIRE_HOT_BG = "#C42B1C"
 
     def _fire_hold(self, family: str, active: bool) -> None:
         slot_id = self._fam_selected.get(family)
         if active:
-            self.Limits_Changed(None, None)  # apply a just-typed 开火强度 first
+            self.Limits_Changed(None, None)
             self._submit(self.engine.fire_start(slot_id=slot_id))
         else:
             self._submit(self.engine.fire_stop(slot_id=slot_id))

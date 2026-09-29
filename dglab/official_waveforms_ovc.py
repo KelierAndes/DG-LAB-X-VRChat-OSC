@@ -1,10 +1,3 @@
-# OVC (负鼠 / Opossum) official waveform presets.
-#
-# Ported verbatim from DG-Lab official open-source project dglab-kit-python
-# (https://github.com/dungeonlab-open/dglab-kit-python, GPL-3.0).
-# Frame format: 8 bytes, the first four (0x0A) are a reserved prefix, the
-# last four are the vibration strength (0-100) per 25 ms segment.
-# Non-commercial use per DG-Lab protocol docs terms.
 
 from __future__ import annotations
 

@@ -1,12 +1,3 @@
-"""Entry point: python main.py   (or the packaged DGLabOSC.exe)
-
-Starts the DG-Lab engine on a background asyncio thread, then runs the
-WinUI 3 (win32more) message pump on the main thread.
-
-``--selftest``: launches the window, closes it automatically after ~3 s and
-writes a JSON report to %TEMP%\\dglab_osc_selftest.json (exit 0 on success) -
-used to smoke-test packaged builds.
-"""
 from __future__ import annotations
 
 import json
@@ -33,7 +24,7 @@ def _log_crash(context: str) -> None:
 
 
 class App(XamlApplication):
-    engine = None  # type: ignore[var-annotated]
+    engine = None
     window = None
 
     def OnLaunched(self, args) -> None:
@@ -55,8 +46,6 @@ class App(XamlApplication):
 
 
 def _run_selftest() -> None:
-    """Auto-close the window after a few seconds and write a report."""
-
     def watcher() -> None:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -76,7 +65,6 @@ def _run_selftest() -> None:
                 REPORT["status_text"] = win.StatusText.Text
                 REPORT["wave_count"] = win.WaveA.Items.Size
                 REPORT["osc_toggle"] = bool(win.OscToggle.IsOn)
-                # Theme toggle verification: switch and read back.
                 before = str(win.ui.RequestedTheme)
                 win.BtnTheme_Click(None, None)
                 after = str(win.ui.RequestedTheme)

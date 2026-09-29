@@ -1,37 +1,3 @@
-"""VRChat OSC bridge.
-
-Follows the VRChat OSC avatar-parameters API
-(https://docs.vrchat.com/docs/avatar-parameters):
-
-* VRChat **listens** on UDP ``9000`` (configurable via ``--osc=in:ip:out``),
-  and **sends** avatar parameter changes to ``9001`` by default.
-* Parameter addresses are ``/avatar/parameters/<Name>``; types Int, Float
-  and Bool.  We therefore *write* device state into avatar parameters and
-  *read* avatar parameters back to control the device - the same direction
-  of flow VRCOSC uses for its own parameters.
-
-Output (device -> avatar, throttled to ``rate_hz``):
-    <prefix>StrengthA / <prefix>StrengthB   Int  0-200 current strength
-    <prefix>LimitA / <prefix>LimitB         Int  0-200 channel limit
-    <prefix>Battery                         Int  0-100 (offline: 0)
-    <prefix>Connected                       Bool paired and online
-    <prefix>ChannelOK_A / <prefix>ChannelOK_B  Bool channel status ok
-    <prefix>Pressure                       Float kPa (BMTR 灵猫 only)
-    <prefix>EdgeState                      Int 0-4 edge-control state (BMTR)
-    <prefix>Action                          Int  app button feedback 0-9,
-                                                 auto-resets to 0 after 0.3 s
-
-Input (avatar -> device), names configurable in config.json:
-    <in_prefix>StrengthA / StrengthB   Int/Float  set absolute strength
-    <in_prefix>WaveA / WaveB           Int        select waveform directly (0=静默,
-                                                  1=持续, then official waveforms)
-    <in_prefix>WaveStepA / WaveStepB   Int        wave stepper: non-zero = next
-                                                  (positive) / previous (negative)
-    <in_prefix>ZapA / ZapB             Bool/Int   1 s pulse burst
-    <in_prefix>Fire                    Bool       触发式开火: press = start burst,
-                                                  release = stop and restore
-    <in_prefix>Emergency               Bool/Int   emergency stop
-"""
 from __future__ import annotations
 
 import asyncio
@@ -50,19 +16,12 @@ from dglab.official_waveforms_ovc import OvcWaveform
 
 
 def wave_order(family: str = "COYOTE") -> list[str]:
-    """OSC wave index order per device family (Int param -> wave name).
-
-    Index 0 = 静默 (no output), 1 = 持续, then the official waveforms in
-    enum order.  Per-family: the OVC set differs from the Coyote set.
-    """
     if family == "OVC":
         return [SILENT, CONTINUOUS] + [w.value for w in OvcWaveform]
     return [SILENT, CONTINUOUS] + [w.value for w in CoyoteWaveform]
 
 
 class OscConfig(dict):
-    """Loose accessors with defaults; loaded from config.json."""
-
     DEFAULTS = {
         "enabled": True,
         "out_ip": "127.0.0.1",
@@ -70,8 +29,6 @@ class OscConfig(dict):
         "in_port": 9001,
         "prefix": "DGLab",
         "rate_hz": 10,
-        # Avatar parameter names that control the device (must match the
-        # parameters you added to your avatar).
         "in_strength_a": "DGLabStrengthA",
         "in_strength_b": "DGLabStrengthB",
         "in_wave_a": "DGLabWaveA",
@@ -80,10 +37,8 @@ class OscConfig(dict):
         "in_zap_b": "DGLabZapB",
         "in_emergency": "DGLabEmergency",
         "in_fire": "DGLabFire",
-        # 波形步进 (加减): Int 非零即上一个/下一个波形, 与直接索引互补
         "in_wave_step_a": "DGLabWaveStepA",
         "in_wave_step_b": "DGLabWaveStepB",
-        # 负鼠 (OVC) input parameters - independent from the Coyote set.
         "in_ovc_strength_a": "DGLabOvcInStrengthA",
         "in_ovc_strength_b": "DGLabOvcInStrengthB",
         "in_ovc_wave_a": "DGLabOvcInWaveA",
@@ -93,8 +48,6 @@ class OscConfig(dict):
         "in_ovc_zap_a": "DGLabOvcInZapA",
         "in_ovc_zap_b": "DGLabOvcInZapB",
         "in_ovc_fire": "DGLabOvcInFire",
-        # Per-family output parameter prefixes; the first device of a family
-        # uses the plain prefix, further devices get an index (DGLab2, ...).
         "device_prefixes": {
             "COYOTE": "DGLab",
             "OVC": "DGLabOvc",
@@ -109,24 +62,14 @@ class OscConfig(dict):
 
 
 class OscBridge:
-    """Pushes device state into VRChat avatar parameters and receives control."""
-
     def __init__(self, config: OscConfig, get_state, commands, events=None):
-        """
-        ``get_state``      -> callable returning the current :class:`EngineState`.
-        ``commands``       -> object with async coroutines:
-                              set_strength(ch, v), set_wave(ch, name),
-                              zap(ch, seconds), emergency_stop().
-        ``events``         -> optional StateEvents; used to catch App button
-                              feedback pulses.
-        """
         self.config = config
         self.get_state = get_state
         self.commands = commands
 
         self._client = SimpleUDPClient(config["out_ip"], int(config["out_port"]))
         self._dispatcher = Dispatcher()
-        self._server = None  # OSC server (threaded)
+        self._server = None
         self._server_thread: threading.Thread | None = None
         self._task: asyncio.Task | None = None
         self._running = False
@@ -140,13 +83,11 @@ class OscBridge:
         self._register_handlers()
 
     def _on_action(self, action: int | None) -> None:
-        """App feedback button pressed -> pulse <prefix>Action for 0.3 s."""
         if action is None:
             return
         self._action_value = int(action)
         self._action_until = time.monotonic() + 0.3
 
-    # ------------------------------------------------------------- handlers
     def _register_handlers(self) -> None:
         cfg = self.config
 
@@ -174,7 +115,6 @@ class OscBridge:
             return handler
 
         def make_wave_step(ch: str, family: str = "COYOTE"):
-            """加减控制: Int 非 0 即步进一个波形 (正=下一个, 负=上一个, 循环)."""
             def handler(_addr, *args):
                 if not args:
                     return
@@ -204,7 +144,6 @@ class OscBridge:
             return handler
 
         def make_fire(family: str = "COYOTE"):
-            """触发式开火: True (按下) starts the burst, False (放开) stops it."""
             def handler(_addr, *args):
                 if not args:
                     return
@@ -221,7 +160,6 @@ class OscBridge:
                 self._spawn(self.commands.emergency_stop())
 
         def avatar_change(_addr, *args):
-            # New avatar loaded: push a full refresh.
             self._last_sent.clear()
 
         self._dispatcher.map(f"/avatar/parameters/{cfg['in_strength_a']}", make_set_strength("A"))
@@ -236,7 +174,6 @@ class OscBridge:
                              make_wave_step("A"))
         self._dispatcher.map(f"/avatar/parameters/{cfg.get('in_wave_step_b', 'DGLabWaveStepB')}",
                              make_wave_step("B"))
-        # 负鼠 (OVC) independent input set.
         self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_strength_a']}", make_set_strength("A", "OVC"))
         self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_strength_b']}", make_set_strength("B", "OVC"))
         self._dispatcher.map(f"/avatar/parameters/{cfg['in_ovc_wave_a']}", make_wave("A", "OVC"))
@@ -251,12 +188,6 @@ class OscBridge:
         self._dispatcher.map("/avatar/change", avatar_change)
 
     def _spawn(self, coro) -> None:
-        """Schedule a command coroutine on the engine loop.
-
-        OSC handlers run on the server's own thread, so the loop reference is
-        captured at start() and coroutines are marshalled with
-        run_coroutine_threadsafe.
-        """
         loop = self._loop
         if loop is None or loop.is_closed():
             coro.close()
@@ -270,7 +201,6 @@ class OscBridge:
         else:
             asyncio.run_coroutine_threadsafe(coro, loop)
 
-    # ------------------------------------------------------------- lifecycle
     async def start(self) -> None:
         if not self.config["enabled"] or self._running:
             return
@@ -299,9 +229,8 @@ class OscBridge:
             self._server = None
         self.log("[OSC] 桥接已停止")
 
-    log = print  # replaced by engine with a real logger
+    log = print
 
-    # ------------------------------------------------------------ push loop
     async def _push_loop(self) -> None:
         interval = 1.0 / max(1, int(self.config["rate_hz"]))
         prefix = self.config["prefix"]
@@ -314,7 +243,6 @@ class OscBridge:
             pass
 
     def _push_state(self, state: EngineState, prefix: str) -> None:
-        # Per-device parameters, grouped and indexed by device family.
         values: dict[str, Any] = {}
         for slot_id, base in self._device_names(state).items():
             slot = state.slots.get(slot_id)
@@ -334,7 +262,6 @@ class OscBridge:
             values[f"{base['name']}Battery"] = (slot.battery or 0)
             values[f"{base['name']}Connected"] = paired
 
-        # App button feedback pulse (Int auto-reset), global.
         now = time.monotonic()
         if now < self._action_until:
             values[f"{prefix}Action"] = self._action_value
@@ -350,10 +277,6 @@ class OscBridge:
         return device_osc_names(state, self.config["device_prefixes"])
 
     def input_target_slot(self, family: str = "COYOTE") -> str | None:
-        """Device addressed by an input family: the FIRST connected device
-        of that family (Coyote inputs -> first Coyote, OVC inputs -> first
-        OVC).  Falls back to the first OUTPUT device (never the BMTR sensor)
-        when the family is absent."""
         state = self.get_state()
         slots = {sid: state.slots[sid] for sid in sorted(state.slots)}
         for sid, slot in slots.items():
@@ -377,7 +300,7 @@ class OscBridge:
         try:
             self._client.send(builder.build())
         except OSError:
-            pass  # VRChat not running; keep trying silently
+            pass
 
 
 def _to_int(value: Any, low: int, high: int) -> int:
@@ -388,13 +311,6 @@ def _to_int(value: Any, low: int, high: int) -> int:
 
 
 def device_osc_names(state: EngineState, prefixes: dict) -> dict[str, dict[str, str]]:
-    """slot_id -> {family, name}: stable per-family indexed OSC base names.
-
-    The first device of each family uses the plain family prefix (e.g.
-    ``DGLab``); further devices of the same family get an index (``DGLab2``,
-    ``DGLab3``, ...), so every connected device owns an independent set of
-    avatar parameters.
-    """
     families: dict[str, list[str]] = {}
     for slot_id in sorted(state.slots):
         slot = state.slots[slot_id]

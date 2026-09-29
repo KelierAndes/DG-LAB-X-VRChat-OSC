@@ -1,4 +1,3 @@
-"""Multi-device tests: per-slot OSC exposure and per-slot V4 operations."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +9,6 @@ from vrc.osc_bridge import OscBridge, OscConfig, device_osc_names
 
 
 def _state_with(slots: dict[str, tuple[str, int, int]]) -> EngineState:
-    """slot_id -> (type, strengthA, strengthB)."""
     state = EngineState(backend="v4", paired=True, connected=True)
     for sid, (dtype, a, b) in slots.items():
         slot = Slot(slot_id=sid, name=sid, type=dtype)
@@ -37,7 +35,6 @@ class OscNamingTests(unittest.TestCase):
             "bmtr-1": ("BMTR_1", 0, 0),
         })
         names = device_osc_names(state, {"COYOTE": "DGLab", "OVC": "DGLabOvc", "BMTR": "DGLabBmtr"})
-        # Coyotes sorted by slotId: slot-a first (plain prefix), slot-b second.
         self.assertEqual(names["slot-a"]["name"], "DGLab")
         self.assertEqual(names["slot-b"]["name"], "DGLab2")
         self.assertEqual(names["ovc-1"]["name"], "DGLabOvc")
@@ -55,7 +52,7 @@ class OscNamingTests(unittest.TestCase):
 
         bridge = OscBridge(OscConfig({"rate_hz": 100}), lambda: state, None)
         sent: dict[str, object] = {}
-        bridge._send_param = lambda name, value: sent.__setitem__(name, value)  # type: ignore[method-assign]
+        bridge._send_param = lambda name, value: sent.__setitem__(name, value)
         bridge._push_state(state, "DGLab")
 
         self.assertEqual(sent.get("DGLabStrengthA"), 11)
@@ -63,7 +60,7 @@ class OscNamingTests(unittest.TestCase):
         self.assertEqual(sent.get("DGLab2StrengthB"), 30)
         self.assertEqual(sent.get("DGLabBmtrPressure"), 7.9)
         self.assertEqual(sent.get("DGLabBmtrEdgeState"), 2)
-        self.assertNotIn("DGLabPressure", sent)  # old single-device name must not be used
+        self.assertNotIn("DGLabPressure", sent)
 
     def test_input_target_prefers_coyote(self):
         state = _state_with({
@@ -85,7 +82,6 @@ class V4SlotRoutingTests(unittest.TestCase):
         ])
         cid, sid = client._require_peer("s2")
         self.assertEqual((cid, sid), ("app", "s2"))
-        # default falls back to the first sorted slot
         cid, sid = client._require_peer(None)
         self.assertEqual(sid, "s1")
 
@@ -102,7 +98,7 @@ class V4SlotRoutingTests(unittest.TestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
 
         async def main():
             await client.add_intensity("A", 5, slot_id="s2")
@@ -127,7 +123,7 @@ class V4SlotRoutingTests(unittest.TestCase):
         async def fake_send(frame):
             sent.append(frame)
 
-        client._send_raw = fake_send  # type: ignore[method-assign]
+        client._send_raw = fake_send
 
         async def main():
             await client.emergency_stop()
@@ -136,8 +132,7 @@ class V4SlotRoutingTests(unittest.TestCase):
         ops = [f["data"]["data"] for f in sent if f["data"].get("m") == "device.op"]
         resets = [o for o in ops if o.get("t") == 7]
         self.assertEqual({o["s"] for o in resets}, {"s1", "s2"})
-        self.assertEqual(len(resets), 4)  # channel A + B per device, 2 devices
-        # estop sends one global clear (no data -> everything)
+        self.assertEqual(len(resets), 4)
         clears = [f["data"] for f in sent if f["data"].get("m") == "device.op.clear"]
         self.assertEqual(len(clears), 1)
         self.assertNotIn("data", clears[0])

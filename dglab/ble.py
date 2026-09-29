@@ -1,16 +1,3 @@
-"""DG-Lab BLE direct connection - MULTIPLE simultaneous devices.
-
-Supported devices (official protocols, ``dungeonlab-open/dglab-bluetooth-protocol``):
-
-* Coyote 3.0 (郊狼) - ``47L121000``: B0/BF/B1 binary e-stim protocol.
-* Coyote 2.0 (郊狼) - ``D-LAB ESTIM01``: 955A-base PWM registers.
-* OVC 1 (负鼠振动) - ``47L127000``: B0 vibration wave + B3 strength + B2 screen.
-* BMTR 1 (灵猫气压) - ``47L124000``: D0 pressure reports (sensor only).
-
-Each connected device becomes one session (keyed by its Bluetooth address)
-inside a single :class:`BleClient`; sessions share the EngineState slots so
-the V4-style per-device routing (engine/UI/OSC) works unchanged.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +18,6 @@ from .waves import (
     wire_to_logical_freq,
 )
 
-# ---------------------------------------------------------------- UUIDs
 V3_SERVICE = "0000180c-0000-1000-8000-00805f9b34fb"
 V3_WRITE = "0000150a-0000-1000-8000-00805f9b34fb"
 V3_NOTIFY = "0000150b-0000-1000-8000-00805f9b34fb"
@@ -57,26 +43,21 @@ KIND_TYPE = {
     "bmtr": "BMTR_1",
 }
 
-# Undocumented vendor service present on BMTR hardware (from GATT dump):
-# FF0A/FF00 notify+write, FF0A/FF01 write-without-response.  The pressure
-# stream very likely flows here - we mirror commands and subscribe to both.
 BMTR_FF_SERVICE = "0000ff0a-0000-1000-8000-00805f9b34fb"
 BMTR_FF_NOTIFY = "0000ff00-0000-1000-8000-00805f9b34fb"
 BMTR_FF_WRITE = "0000ff01-0000-1000-8000-00805f9b34fb"
 
 V2_BASE = "955A{:04x}-0FE2-F5AA-A094-84B8D4F3E8AD"
 V2_PWM_AB2 = V2_BASE.format(0x1504)
-V2_PWM_A34 = V2_BASE.format(0x1505)  # B channel waveform
-V2_PWM_B34 = V2_BASE.format(0x1506)  # A channel waveform
+V2_PWM_A34 = V2_BASE.format(0x1505)
+V2_PWM_B34 = V2_BASE.format(0x1506)
 V2_BATTERY = V2_BASE.format(0x1500)
 
 CHANNELS = ("A", "B")
-LOOP_INTERVAL = 0.1  # 100 ms
+LOOP_INTERVAL = 0.1
 
 OVC_B2_BODY = bytes.fromhex("FFFF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0809")
 
-# 0x50 color byte values, hardware-verified: 0x01 yellow (documented),
-# 0x02 magenta, 0x03 purple, 0x04 blue, 0x05 cyan, 0x06 green.
 LED_COLORS = {
     "off": 0x00,
     "yellow": 0x01,
@@ -91,7 +72,6 @@ LED_COLORS = {
 def build_b0(seq: int, method: int, strength_a: int, strength_b: int,
              freq_a: list[int], wave_a: list[int],
              freq_b: list[int], wave_b: list[int]) -> bytes:
-    """20-byte Coyote V3 B0 frame (see protocol doc; seq in high nibble)."""
     frame = bytearray(20)
     frame[0] = 0xB0
     frame[1] = ((seq & 0x0F) << 4) | (method & 0x0F)
@@ -105,7 +85,6 @@ def build_b0(seq: int, method: int, strength_a: int, strength_b: int,
 
 
 def build_ovc_b0(wave_a: list[int], wave_b: list[int]) -> bytes:
-    """OVC B0: vibration strength (0-100) per 25 ms segment, both channels."""
     frame = bytearray(20)
     frame[0] = 0xB0
     frame[8:12] = bytes(max(0, min(100, s)) for s in wave_a)
@@ -114,7 +93,6 @@ def build_ovc_b0(wave_a: list[int], wave_b: list[int]) -> bytes:
 
 
 def build_ovc_b3(a: int | None, b: int | None) -> bytes:
-    """OVC strength; 0xFF keeps a channel unchanged."""
     return bytes(
         [0xB3, 0xFF if a is None else (max(0, min(200, a)) & 0xFF),
          0xFF if b is None else (max(0, min(200, b)) & 0xFF)]
@@ -122,7 +100,6 @@ def build_ovc_b3(a: int | None, b: int | None) -> bytes:
 
 
 def build_ovc_b2(a: int, b: int) -> bytes:
-    """OVC on-screen channel strength refresh (0xB2 + fixed body + A + B)."""
     return bytes([0xB2]) + OVC_B2_BODY + bytes(
         [max(0, min(200, a)) & 0xFF, max(0, min(200, b)) & 0xFF]
     )
@@ -143,14 +120,12 @@ def build_bmtr_66(reset_pressure: bool = False, orientation: int = 0) -> bytes:
 
 
 def parse_bmtr_pressure(data: bytearray | bytes) -> float | None:
-    """D0 notification -> pressure kPa (int16 LE at bytes 8-9 / 100)."""
     if len(data) < 10 or data[0] != 0xD0:
         return None
     return int.from_bytes(data[8:10], "little", signed=True) / 100.0
 
 
 def parse_ovc_buttons(data: bytearray | bytes) -> list[int]:
-    """D0 notification -> pressed button bit indexes."""
     if len(data) < 4 or data[0] != 0xD0:
         return []
     bitmap = int.from_bytes(data[2:4], "big")
@@ -158,32 +133,25 @@ def parse_ovc_buttons(data: bytearray | bytes) -> list[int]:
 
 
 def pack_pwm_ab2(strength_a: int, strength_b: int) -> bytes:
-    """V2 PWM_AB2: bits 21-11 = A, bits 10-0 = B (device value = app * 7)."""
     a = max(0, min(0x7FF, int(strength_a) * 7))
     b = max(0, min(0x7FF, int(strength_b) * 7))
     return ((a << 11) | b).to_bytes(3, "big")
 
 
 def pack_xyz(x: int, y: int, z: int) -> bytes:
-    """V2 waveform register: X bits 4-0, Y bits 14-5, Z bits 19-15."""
     return (((z & 0x1F) << 15) | ((y & 0x3FF) << 5) | (x & 0x1F)).to_bytes(3, "big")
 
 
 class BleSession:
-    """One connected device (one BleakClient + its runtime state)."""
-
     def __init__(self, slot_id: str, kind: str, client: BleakClient):
         self.slot_id = slot_id
         self.kind = kind
         self.client = client
-        # Desired strength per channel; the writer resends the absolute-set
-        # command every tick until the device's report confirms the value -
-        # dropped writes or missed echoes self-heal instead of dead-locking.
         self._targets = {"A": 0, "B": 0}
         self._sent: dict[str, int | None] = {"A": None, "B": None}
-        self._actual = {"A": 0, "B": 0}  # last device-confirmed value
+        self._actual = {"A": 0, "B": 0}
         self._awaiting_seq = 0
-        self._await_since: int | None = None  # writer tick when seq was set
+        self._await_since: int | None = None
         self.ticks = 0
         self._unparsed_logged = 0
         self._seq = 0
@@ -196,7 +164,7 @@ class BleSession:
         self.orientation = 1
         self.fire_task: asyncio.Task | None = None
         self._fire_saved: dict[str, int] = {}
-        self._deliberate = False  # set before user-initiated disconnects
+        self._deliberate = False
 
     @property
     def device_type(self) -> str:
@@ -208,8 +176,6 @@ class BleSession:
 
 
 class BleClient:
-    """Asyncio BLE manager for several DG-Lab devices at once."""
-
     def __init__(
         self,
         events: StateEvents | None = None,
@@ -228,12 +194,8 @@ class BleClient:
         )
         self.state = EngineState(backend="ble")
         self.sessions: dict[str, BleSession] = {}
-        # Addresses that were BLE-connected this run and dropped unexpectedly
-        # (detected via bleak's disconnected_callback) - the auto-reconnect
-        # loop retries ONLY these, never devices the user controls elsewhere.
         self.dropped: set[str] = set()
 
-    # ------------------------------------------------------------------ util
     def _log(self, msg: str) -> None:
         self.events.emit("log", f"[BLE] {msg}")
 
@@ -260,7 +222,6 @@ class BleClient:
             return next(iter(self.sessions.values()))
         raise RuntimeError("没有已连接的蓝牙设备")
 
-    # ------------------------------------------------------------------ scan
     @staticmethod
     async def scan(timeout: float = 6.0) -> list[dict]:
         found: dict[str, dict] = {}
@@ -285,7 +246,6 @@ class BleClient:
             }
         return list(found.values())
 
-    # ------------------------------------------------------------ connection
     async def connect(self, address: str, kind: str = "coyote_v3") -> None:
         if address in self.sessions:
             self._log(f"{address} 已连接，忽略重复连接")
@@ -308,7 +268,6 @@ class BleClient:
             V3_NOTIFY, lambda sender, data, s=session: self._on_notify(s, sender, data)
         )
         if kind == "bmtr":
-            # Mirror the notify subscription on the vendor characteristic.
             try:
                 await client.start_notify(
                     BMTR_FF_NOTIFY,
@@ -335,9 +294,6 @@ class BleClient:
         elif kind == "ovc":
             await self._write(session, build_ovc_50(enable_buttons=True))
         elif kind == "bmtr":
-            # documented 150A pipe ONLY: writing the vendor FF01
-            # characteristic REBOOTS the device.  Write mode is irrelevant
-            # (field A/B test: WWR and WR both take effect).
             enable = build_bmtr_50(enable_pressure=True)
             try:
                 await self._write(session, enable)
@@ -345,7 +301,6 @@ class BleClient:
                           f"({len(enable)}B: {enable.hex().upper()})")
             except Exception as exc:
                 self._log(f"{session.slot_id} 0x50 使能写入失败: {exc!r}")
-            # Keep re-sending the enable command every second on 150A.
             session.writer_task = asyncio.create_task(self._bmtr_keepalive(session))
         elif kind == "coyote_v2":
             await client.start_notify(
@@ -353,9 +308,6 @@ class BleClient:
             )
 
         if kind != "bmtr":
-            # The App keeps intensity state only while wave data flows, so a
-            # waveform must ALWAYS be running - default to the silent
-            # (zero-strength) wave: no output until the user picks one.
             silent = resolve_wave_frames(SILENT, session.device_type)
             session._cycles["A"].reset(silent)
             session._cycles["B"].reset(silent)
@@ -365,9 +317,6 @@ class BleClient:
         self._log(f"{KIND_LABELS.get(kind, kind)} 已接入 (共 {len(self.sessions)} 台在线，默认「静默」波形)")
 
     def _on_ble_drop(self, address: str) -> None:
-        """bleak disconnected_callback: a live link dropped unexpectedly.
-        Without this the session stayed as a zombie (writes failing, state
-        stale) and auto-reconnect never triggered."""
         session = self.sessions.get(address)
         if session is None or session._deliberate:
             return
@@ -410,7 +359,6 @@ class BleClient:
                 await asyncio.sleep(1.0)
                 if self.sessions.get(session.slot_id) is not session:
                     return
-                # 150A only - the vendor FF01 pipe reboots the device.
                 await self._write(session, build_bmtr_50(enable_pressure=True,
                                                               color=session.led_color))
                 self._log_d0_stats(session)
@@ -420,12 +368,6 @@ class BleClient:
             self._log(f"{session.slot_id} 使能保活失败: {exc!r}")
 
     def _log_d0_stats(self, session: BleSession) -> None:
-        """One log line per second: what (if anything) the D0 stream delivered.
-
-        Pressure should arrive as 17-byte 0xD0 frames every 100 ms on 150B
-        (official doc); any deviation (wrong length, other header, silence)
-        shows up here for analysis.
-        """
         stats = session.__dict__.get("notify_stats", {})
         if not stats:
             self._log(f"{session.slot_id} D0接收统计(1s): 未收到任何通知帧")
@@ -440,7 +382,7 @@ class BleClient:
                     parts.append(f"气压 {pressure:.2f} kPa")
             else:
                 parts.append(f"[{uuid}]无数据")
-            stats[uuid][0] = 0  # reset the per-second counter, keep the last frame
+            stats[uuid][0] = 0
         self._log(f"{session.slot_id} D0接收统计(1s): " + " ".join(parts))
 
     async def _write(self, session: BleSession, data: bytes, char: str | None = None) -> None:
@@ -448,24 +390,18 @@ class BleClient:
         try:
             await session.client.write_gatt_char(characteristic, data, response=False)
         except Exception:
-            # Some stacks only accept write-with-response; retry once.
             await session.client.write_gatt_char(characteristic, data, response=True)
 
-    # ------------------------------------------------------------ notify cb
     def _on_battery(self, session: BleSession, _sender: Any, data: bytearray) -> None:
         if data:
             self._slot(session).battery = int(data[0])
             self._publish()
 
     def _on_notify(self, session: BleSession, sender: Any, data: bytearray) -> None:
-        """Notify callback - bleak invokes callbacks synchronously and never
-        awaits returned coroutines, so this must stay a plain function."""
         if not data:
             return
         head = data[0]
         if session.kind == "bmtr":
-            # Per-second D0 diagnostics: count frames per characteristic and
-            # keep the latest raw bytes so the keepalive task can log them.
             uuid = str(getattr(sender, "uuid", "")).split("-")[0].upper()[-8:]
             stats = session.__dict__.setdefault("notify_stats", {})
             entry = stats.setdefault(uuid, [0, b""])
@@ -491,12 +427,9 @@ class BleClient:
             elif head == 0xD0:
                 self._handle_buttons(session, data)
             return
-        # Coyote V3
         if head == 0xB1 and len(data) >= 4:
             seq = data[1]
             session._actual = {"A": int(data[2]), "B": int(data[3])}
-            # Device report authoritative (physical knob changes included):
-            # adopt it when it diverges from what we commanded.
             if session._actual != session._targets:
                 session._targets = dict(session._actual)
             self._slot(session).strength = dict(session._actual)
@@ -523,7 +456,6 @@ class BleClient:
             self.events.emit("ovc_button", session.slot_id, bit)
         session._pressed = pressed
 
-    # ------------------------------------------------------------- BF (V3)
     async def _send_bf(self, session: BleSession) -> None:
         fa, fb, sa, sb = self.balance
         frame = bytes([
@@ -535,7 +467,6 @@ class BleClient:
         await self._write(session, frame)
         self._log(f"{session.slot_id} BF 已写入: 软限制 A={self.soft_limits['A']} B={self.soft_limits['B']}")
 
-    # ------------------------------------------------------------ writer loop
     async def _writer_loop(self, session: BleSession) -> None:
         errors = 0
         try:
@@ -572,8 +503,6 @@ class BleClient:
             freqs, strengths = list(raw[:4]), list(raw[4:])
         method_ch = 0b00
         strength_byte = session._targets[ch]
-        # Resend the absolute-set until the device confirms the value
-        # (B1 report); dropouts self-heal on the next 100 ms tick.
         if session._targets[ch] != session._sent[ch]:
             target = max(0, min(self.soft_limits[ch], session._targets[ch]))
             strength_byte = target
@@ -628,7 +557,6 @@ class BleClient:
             await self._write(session, pack_xyz(x, y, z), char)
         session.monitor.record(segs_a, segs_b)
 
-    # ------------------------------------------------------------ public ops
     async def set_strength(self, channel: str, value: int, slot_id: str | None = None) -> None:
         session = self._session(slot_id)
         if session.kind == "bmtr":
@@ -638,7 +566,7 @@ class BleClient:
         else:
             value = max(0, min(self.soft_limits[channel], int(value)))
         session._targets[channel] = value
-        session._actual[channel] = value  # optimistic; corrected by report
+        session._actual[channel] = value
         self._slot(session).strength[channel] = value
         self._publish()
 
@@ -661,7 +589,7 @@ class BleClient:
             else list(self.sessions.values())
         for session in sessions:
             if session.kind == "bmtr":
-                continue  # sensor-only device: no wave session
+                continue
             for ch in CHANNELS:
                 if channel in (None, ch):
                     session._cycles[ch].reset([])
@@ -675,7 +603,6 @@ class BleClient:
 
     async def fire(self, slot_id: str | None = None, duration_s: float = 1.0,
                    value: int | None = None) -> None:
-        """一键开火: temporarily raise both channels, then restore."""
         session = self._session(slot_id)
         if session.kind == "bmtr":
             raise RuntimeError("灵猫是气压传感器，无输出通道")
@@ -683,8 +610,6 @@ class BleClient:
         if session.fire_task is not None and not session.fire_task.done():
             session.fire_task.cancel()
 
-        # Apply the burst synchronously, then restore after the duration.
-        # Restore to the user-visible strength (device echo may lag behind).
         saved = dict(self._slot(session).strength)
         for ch in CHANNELS:
             session._targets[ch] = cap
