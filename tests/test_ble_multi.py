@@ -10,7 +10,7 @@ from dglab.ble import BleClient, V3_NOTIFY
 from dglab.state import EngineState, Slot, StateEvents, family_of
 from dglab.official_waveforms_ovc import OvcWaveform
 from dglab.waves import CONTINUOUS, SILENT
-from vrc.osc_bridge import OscBridge, OscConfig
+from modules.osc_bridge.bridge import OscBridge, OscConfig
 
 
 class FakeBleakClient:
@@ -226,7 +226,7 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
         assert not any(c[2] == "coyote-2" for c in calls), calls
 
     async def test_wave_direct_and_step_inputs(self):
-        from vrc.osc_bridge import wave_order
+        from modules.osc_bridge.bridge import wave_order
 
         order = wave_order("COYOTE")
         assert order[0] == SILENT and order[1] == CONTINUOUS
@@ -247,6 +247,9 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
             async def set_wave(self, ch, name, slot_id=None):
                 waves.append((ch, name))
                 self._selected_wave[ch] = name
+
+            def wave_selection(self):
+                return dict(self._selected_wave)
 
             async def fire_start(self, slot_id=None):
                 pass

@@ -17,6 +17,7 @@ from win32more.Microsoft.UI.Xaml import (
     Visibility,
 )
 from win32more.Microsoft.UI.Xaml.Controls import (
+    AutoSuggestBox,
     Border,
     Button,
     ComboBox,
@@ -26,10 +27,12 @@ from win32more.Microsoft.UI.Xaml.Controls import (
     Grid,
     HyperlinkButton,
     Image,
+    NumberBox,
     Orientation,
     RowDefinition,
     ScrollBarVisibility,
     ScrollViewer,
+    Slider,
     StackPanel,
     Symbol,
     SymbolIcon,
@@ -505,6 +508,62 @@ def dropdown(label: str, choices, *, selected: int = 0, width: float | None = No
     cell.Children.Append(text(label, size=11, color="text3", trimming=True))
     cell.Children.Append(combo(choices, selected=selected, width=width))
     return cell
+
+def slider(minimum: float, maximum: float, value: float, *, step: float = 1.0,
+           width: float | None = None, on_change=None, on_commit=None) -> Slider:
+    """数值滑块：拖动中回调 on_change，松手（或 WinUI 事件缺失时即时）回调 on_commit。"""
+    s = Slider()
+    s.Minimum = float(minimum)
+    s.Maximum = float(maximum)
+    s.Value = float(value)
+    s.StepFrequency = float(step)
+    s.IsSnapToTickEnabled = True
+    s.HorizontalAlignment = _HALIGN["stretch"]
+    if width:
+        s.Width = width
+    if on_change is not None:
+        s.ValueChanged += lambda sender, args: on_change(float(args.NewValue))
+    if on_commit is not None:
+        try:
+            s.DragCompleted += lambda sender, args: on_commit(float(s.Value))
+        except Exception:
+            # 绑定层缺少 DragCompleted 时退回即时提交
+            s.ValueChanged += lambda sender, args: on_commit(float(args.NewValue))
+    return s
+
+def suggest_box(*, text: str = "", choices=None, placeholder: str = "",
+                width: float | None = None, on_commit=None) -> AutoSuggestBox:
+    """可任意输入、可从预定义项中选择的编辑框。"""
+    box = AutoSuggestBox()
+    box.Text = text
+    if placeholder:
+        box.PlaceholderText = placeholder
+    for choice in (choices or []):
+        box.Items.Append(str(choice))
+    if width:
+        box.Width = width
+        box.HorizontalAlignment = _HALIGN["left"]
+    if on_commit is not None:
+        box.TextChanged += lambda sender, args: on_commit((sender.Text or "").strip())
+        box.QuerySubmitted += lambda sender, args: on_commit((sender.Text or "").strip())
+    return box
+
+def number_box(value, minimum: float, maximum: float, *, width: float | None = None,
+               on_commit=None) -> NumberBox:
+    nb = NumberBox()
+    nb.Minimum = float(minimum)
+    nb.Maximum = float(maximum)
+    nb.Value = float(value)
+    nb.SmallChange = 1
+    nb.LargeChange = 10
+    if width is not None:
+        nb.Width = width
+        nb.HorizontalAlignment = _HALIGN["left"]
+    else:
+        nb.HorizontalAlignment = _HALIGN["stretch"]
+    if on_commit is not None:
+        nb.ValueChanged += lambda sender, args: on_commit(float(args.NewValue))
+    return nb
 
 def interface_area(fields, *, per_row: int = 3, spacing: float = 16):
     outer = stack(spacing=10, h="stretch")

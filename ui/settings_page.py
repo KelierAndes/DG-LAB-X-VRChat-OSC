@@ -10,7 +10,7 @@ from ui.paths import xaml
 _GROUP_SYMBOLS = {
     "外观": "Highlight",
     "连接": "Remote",
-    "OSC": "Sync",
+    "配置文件": "Document",
     "日志": "List",
     "关于": "Important",
 }
@@ -29,14 +29,14 @@ class SettingsPage(XamlClass, Page):
             W.page_head(
                 self.HeadHost,
                 {"title": "设置",
-                 "subtitle": "外观、连接、控制与日志参数；修改即时写入配置，关闭窗口时保存",
+                 "subtitle": "外观、连接、控制与日志参数；OSC 设置在「联动」页配置",
                  "breadcrumb": ["设置"]},
                 actions=[
                     W.text_button("保存到文件", symbol="Save", accent=True,
-                                  on_click=lambda s, e: self.shell.engine.save_config()),
+                                  on_click=lambda s, e: self._save_all()),
                     W.text_button("恢复默认提示", symbol="Refresh",
                                   on_click=lambda s, e: self.shell.logs.append(
-                                      "恢复默认：请删除 config.json 后重启应用")),
+                                      "恢复默认：请删除 config.json 与 config/ 目录后重启应用")),
                 ],
             )
 
@@ -44,7 +44,7 @@ class SettingsPage(XamlClass, Page):
             host.Children.Clear()
             host.Children.Append(self._group_appearance())
             host.Children.Append(self._group_connection())
-            host.Children.Append(self._group_osc())
+            host.Children.Append(self._group_config_files())
             host.Children.Append(self._group_log())
             host.Children.Append(self._group_about())
         finally:
@@ -76,9 +76,6 @@ class SettingsPage(XamlClass, Page):
             self._switch_row("自动重连", "蓝牙连接意外断开时每 5 秒重试",
                              bool(cfg.get("auto_reconnect", True)),
                              self._auto_changed),
-            self._switch_row("启动时恢复 OSC 桥接", "打开应用即按上次状态启动 OSC",
-                             bool(cfg["osc"].get("enabled", True)),
-                             self._osc_enabled_changed),
             self._text_row("Socket V4 中继服务器地址", "留空使用默认官方中继",
                            str(cfg.get("v4_url", "")),
                            lambda text: cfg.__setitem__("v4_url", text or cfg["v4_url"])),
@@ -98,23 +95,86 @@ class SettingsPage(XamlClass, Page):
         ]
         return self._wrap("连接", "中继服务器与蓝牙", rows)
 
-    def _group_osc(self) -> object:
-        osc = self.shell.engine.config["osc"]
+    def _group_config_files(self) -> object:
+        engine = self.shell.engine
         rows = [
-            self._text_row("VRChat 地址", "OSC 输出目标 IP",
-                           str(osc.get("out_ip", "127.0.0.1")),
-                           lambda text: osc.__setitem__("out_ip", text or osc["out_ip"])),
-            self._text_row("输出端口", "发送设备数值到 VRChat 的端口",
-                           str(osc.get("out_port", 9000)),
-                           lambda text: self._set_int(osc, "out_port", text, 9000)),
-            self._text_row("监听端口", "接收 VRChat 数据与 OSC 探测的端口",
-                           str(osc.get("in_port", 9001)),
-                           lambda text: self._set_int(osc, "in_port", text, 9001)),
-            self._text_row("全局参数前缀", "Action 等全局参数的前缀",
-                           str(osc.get("prefix", "DGLab")),
-                           lambda text: osc.__setitem__("prefix", text or osc["prefix"])),
+            self._info_row("主配置文件", "引擎与设备参数（config.json）", engine.config.path),
+            self._info_row("模块配置目录", "每模块一个文件，启动时按声明自动装载补齐",
+                           engine.modules.config_dir),
         ]
-        return self._wrap("OSC", "地址与端口（修改后重新开关桥接生效）", rows)
+        buttons = W.stack(horizontal=True, spacing=10, v="center", h="right")
+        buttons.Children.Append(W.text_button(
+            "保存到文件", symbol="Save", accent=True,
+            on_click=lambda s, e: self._save_all()))
+        buttons.Children.Append(W.text_button(
+            "从指定文件载入…", symbol="OpenLocal",
+            on_click=lambda s, e: self._load_config()))
+        buttons.Children.Append(W.text_button(
+            "导出全部配置…", symbol="Upload",
+            on_click=lambda s, e: self._export_config()))
+        rows.append(W.field_row("手动存取", "载入会写盘并重启运行中的模块立即生效", buttons))
+        return self._wrap("配置文件", "核心：启动自动装载 · 手动保存 / 载入 / 导出", rows)
+
+    # ------------------------------------------------------ 初始化配置模块
+
+    def _init_module(self):
+        manager = self.shell.engine.modules
+        inst = manager.instance("config_init")
+        if inst is None:
+            try:
+                inst = manager.load("config_init")
+            except RuntimeError as exc:
+                self.shell.logs.append(f"初始化配置模块不可用: {exc}")
+        return inst
+
+    def _save_all(self) -> None:
+        inst = self._init_module()
+        if inst is None:
+            return
+        inst.save_all()
+        self.shell.logs.append("配置已全部保存到文件")
+
+    def _load_config(self) -> None:
+        from ui.dialogs import pick_open_path
+
+        path = pick_open_path("选择要载入的配置文件",
+                              initial_dir=self.shell.engine.modules.config_dir)
+        if not path:
+            return
+        inst = self._init_module()
+        if inst is None:
+            return
+
+        async def _run():
+            try:
+                applied = inst.load_from(path)
+                restarted = await inst.restart_running()
+                inst.save_all()
+                self.shell.engine._log(
+                    f"已从文件载入配置：应用 {applied} 个文件，"
+                    f"重启模块 {len(restarted)} 个")
+            except (OSError, ValueError) as exc:
+                self.shell.engine._log(f"载入配置失败: {exc!r}")
+            except Exception as exc:
+                self.shell.engine._log(f"载入配置异常: {exc!r}")
+            self.shell.ui_queue.put(self.rebuild)
+
+        self.shell.submit(_run())
+
+    def _export_config(self) -> None:
+        from ui.dialogs import pick_save_path
+
+        path = pick_save_path("导出全部配置", default_name="dgstudio-config.json")
+        if not path:
+            return
+        inst = self._init_module()
+        if inst is None:
+            return
+        try:
+            count = inst.export_to(path)
+            self.shell.logs.append(f"已导出 {count} 个配置文件到 {path}")
+        except OSError as exc:
+            self.shell.logs.append(f"导出配置失败: {exc!r}")
 
     def _group_log(self) -> object:
         cfg = self.shell.engine.config
@@ -122,7 +182,7 @@ class SettingsPage(XamlClass, Page):
             self._switch_row("记录通信数据帧", "收发的协议帧写入日志（内容较多）",
                              bool(cfg.get("log_frames", True)),
                              lambda value: cfg.__setitem__("log_frames", value)),
-            self._switch_row("写日志文件", "记录到应用目录 dglab_osc.log",
+            self._switch_row("写日志文件", "记录到应用目录 dgstudio.log",
                              bool(cfg.get("log_to_file", True)),
                              self._log_file_changed),
         ]
@@ -130,7 +190,7 @@ class SettingsPage(XamlClass, Page):
 
     def _group_about(self) -> object:
         rows = [
-            self._info_row("版本", "DGOSC Studio", "2.0 (Fluent Studio)"),
+            self._info_row("版本", "DGStudio", "2.1 (模块化)"),
             self._info_row("运行时", "win32more / WinUI 3", "0.8+"),
             self._info_row("配置文件", "应用目录下 config.json",
                            self.shell.engine.config.path),
@@ -172,11 +232,6 @@ class SettingsPage(XamlClass, Page):
         if self._updating:
             return
         self.shell.engine.config["auto_reconnect"] = value
-
-    def _osc_enabled_changed(self, value: bool) -> None:
-        if self._updating:
-            return
-        self.shell.engine.config["osc"]["enabled"] = value
 
     def _log_file_changed(self, value: bool) -> None:
         if self._updating:

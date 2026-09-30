@@ -49,7 +49,7 @@ class DashboardPage(XamlClass, Page):
 
         W.page_head(
             self.HeadHost,
-            {"title": "概览", "subtitle": "已连接设备状态、连接通道与实时 OSC 数值",
+            {"title": "概览", "subtitle": "设备统计、输入 / 输出链路与通道实时数据",
              "breadcrumb": ["控制台", "概览"]},
             actions=[
                 W.text_button("刷新", symbol="Refresh", on_click=lambda s, e: self.rebuild()),
@@ -58,8 +58,10 @@ class DashboardPage(XamlClass, Page):
             ],
         )
         self._fill_stats()
-        self.ChannelsHost.Content = self._channels_card()
-        self.OscHost.Content = self._osc_card()
+        self.InputChannelsHost.Content = self._input_channels_card()
+        self.OutputChannelsHost.Content = self._output_channels_card()
+        self.InputValuesHost.Content = self._input_values_card()
+        self.OutputValuesHost.Content = self._output_values_card()
 
         host = self.DevicesHost
         host.Children.Clear()
@@ -174,8 +176,9 @@ class DashboardPage(XamlClass, Page):
             self._quick_cell("电量", live.battery_text(slot), bat,
                              "success" if bat > 60 else "warning"),
             2))
-        wave_a = live.wave_label(str(self.shell.engine._selected_wave.get("A", "")))
-        wave_b = live.wave_label(str(self.shell.engine._selected_wave.get("B", "")))
+        waves = self.shell.engine.wave_selection()
+        wave_a = live.wave_label(str(waves.get("A", "")))
+        wave_b = live.wave_label(str(waves.get("B", "")))
         row.Children.Append(W.put(self._wave_cell(f"A {wave_a} · B {wave_b}"), 3))
         row.Children.Append(W.put(_gap(links, 10), 4))
         return row
@@ -205,125 +208,164 @@ class DashboardPage(XamlClass, Page):
             child=row, h="stretch",
         )
 
-    def _channels_card(self):
-        rows = W.stack(spacing=0)
-        entries = self._channel_entries()
-        for i, entry in enumerate(entries):
-            if i:
-                rows.Children.Append(W.divider())
-            rows.Children.Append(self._channel_row(entry))
-
-        head = W.card_head(
-            "连接通道",
-            subtitle="Socket V3 / V4 中继 · 蓝牙 GATT · OSC 桥接",
-            symbol="Remote",
-            trailing=nav.link("管理连接", "connect"),
-        )
-        inner = W.stack(spacing=10)
-        inner.Children.Append(head)
-        inner.Children.Append(rows)
-        return W.card(inner)
-
-    def _channel_entries(self) -> list[dict]:
-        engine = self.shell.engine
-        state = self.shell.state
-        entries: list[dict] = []
-        backend = engine.backend_kind
-        if backend in ("v4", "v3"):
-            url = engine.config["v4_url" if backend == "v4" else "v3_url"]
-            entries.append({
-                "name": f"{'负鼠/郊狼 4.x' if backend == 'v4' else '郊狼 3.x'} · Socket V{backend[-1]}",
-                "transport": "WebSocket",
-                "endpoint": url,
-                "direction": "中继",
-                "state": "connected" if state.connected else "connecting",
-            })
-        elif backend == "ble":
-            for sid in sorted(state.slots):
-                slot = state.slots[sid]
-                entries.append({
-                    "name": f"{slot.name or slot.type or sid} · 蓝牙 GATT",
-                    "transport": "BLE",
-                    "endpoint": sid,
-                    "direction": "双向",
-                    "state": "connected",
-                })
-        osc = engine.osc
-        osc_on = osc is not None and getattr(osc, "_running", False)
-        cfg = engine.config["osc"]
-        entries.append({
-            "name": "VRChat OSC 桥接",
-            "transport": "UDP",
-            "endpoint": f"{cfg['out_ip']}:{cfg['out_port']} ← {cfg['in_port']}",
-            "direction": "双向",
-            "state": "connected" if osc_on else "closed",
-        })
-        return entries
-
-    def _channel_row(self, entry: dict):
-        token = {"connected": ("success", "已建立"),
-                 "connecting": ("accent_text", "连接中"),
-                 "closed": ("text3", "未启用")}.get(entry["state"], ("text3", "未启用"))
-        g = W.grid(W.star(1), W.fixed(120), W.auto())
-
-        info = W.stack(spacing=2, v="center")
-        info.Children.Append(W.text(entry["name"], size=13, bold=W.SEMIBOLD, trimming=True))
-        info.Children.Append(W.text(
-            f"{entry['transport']} · {entry['endpoint']} · {entry['direction']}",
-            size=11, color="text3", trimming=True))
-        g.Children.Append(W.put(info, 0))
-
-        g.Children.Append(W.put(_spacer(), 1))
-        g.Children.Append(W.put(W.text(token[1], size=11, color=token[0]), 2))
-        return W.box(height=48, child=g)
-
-    def _osc_card(self):
-        head = W.card_head(
-            "OSC 数据值",
-            subtitle="当前设备数值（对外发布的参数）",
-            symbol="Sync",
-            accent=True,
-            trailing=nav.link("参数映射", "link"),
-        )
-
-        table_head = W.grid(W.star(2), W.fixed(56), W.fixed(96), W.star(2))
-        gap = Thickness(12, 0, 0, 0)
-        for label, col in (("参数", 0), ("类型", 1), ("当前值", 2), ("幅度", 3)):
-            cell = W.text(label, size=12, color="text3", margin=gap if col else None)
-            table_head.Children.Append(W.put(cell, col))
-
-        rows = W.stack(spacing=0)
-        rows.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
-        lines = live.osc_value_rows(self.shell.state)
-        if not lines:
-            rows.Children.Append(W.box(height=36, child=W.text(
-                "（未接入设备）", size=12, color="text3", v="center")))
-        for line in lines:
-            rows.Children.Append(self._osc_row(line))
-
+    def _card_frame(self, title: str, subtitle: str, *, symbol: str,
+                    trailing=None, accent: bool = False) -> object:
+        head = W.card_head(title, subtitle=subtitle, symbol=symbol, accent=accent,
+                           trailing=trailing)
         inner = W.stack(spacing=8)
         inner.Children.Append(head)
+        inner.Children.Append(W.divider(margin=Thickness(0, 2, 0, 0)))
+        return inner
+
+    def _input_channels_card(self) -> object:
+        inner = self._card_frame(
+            "输入通道",
+            "控制输入与遥测进入应用的链路",
+            symbol="Download",
+            trailing=nav.link("联动设置", "link"),
+        )
+        body = W.stack(spacing=0)
+        rows = live.input_channel_rows(self.shell.engine, self.shell.state)
+        for i, entry in enumerate(rows):
+            if i:
+                body.Children.Append(W.divider())
+            body.Children.Append(self._input_channel_row(entry))
+        inner.Children.Append(body)
+        return W.card(inner)
+
+    def _input_channel_row(self, entry: dict) -> object:
+        fg, bg = (("success", "success_soft") if entry["enabled"]
+                  else ("text3", "track"))
+        label = "已启用" if entry["enabled"] else "未启用"
+        g = W.grid(W.star(1), W.auto())
+        left = W.stack(spacing=2, v="center")
+        left.Children.Append(W.text(entry["name"], size=13, bold=W.SEMIBOLD,
+                                    trimming=True))
+        hint = entry.get("hint") or entry["detail"]
+        left.Children.Append(W.text(hint, size=11, color="text3", trimming=True))
+        g.Children.Append(W.put(left, 0))
+        g.Children.Append(W.put(W.pill(label, fg, bg,
+                                       dot_color=fg if entry["enabled"] else None), 1))
+        return W.box(height=48, child=g, h="stretch")
+
+    def _output_channels_card(self) -> object:
+        inner = self._card_frame(
+            "输出通道",
+            "输出设备通道与探活状态",
+            symbol="Remote",
+            trailing=nav.link("设备控制", "control"),
+        )
+        body = W.stack(spacing=0)
+        rows = live.output_channel_rows(self.shell.state)
+        for i, entry in enumerate(rows):
+            if i:
+                body.Children.Append(W.divider())
+            body.Children.Append(self._output_channel_row(entry))
+        if not rows:
+            body.Children.Append(W.box(height=36, child=W.text(
+                "（未接入输出设备）", size=12, color="text3", v="center")))
+        inner.Children.Append(body)
+        return W.card(inner)
+
+    def _output_channel_row(self, entry: dict) -> object:
+        fg, bg = (("success", "success_soft") if entry["alive"]
+                  else ("danger", "danger_soft"))
+        g = W.grid(W.fixed(110), W.star(1), W.auto())
+        title = W.stack(spacing=2, v="center")
+        title.Children.Append(W.text(f"{entry['device']} · {entry['channel']}",
+                                     size=12, bold=W.SEMIBOLD, trimming=True))
+        title.Children.Append(W.text(f"{entry['value']}/{entry['limit']}",
+                                     size=11, color="text3"))
+        g.Children.Append(W.put(title, 0))
+        g.Children.Append(W.put(W.box(margin=Thickness(0, 0, 10, 0),
+                                      child=W.meter(entry["percent"], width=120),
+                                      v="center", h="left"), 1))
+        g.Children.Append(W.put(W.pill(f"探活 {entry['alive_text']}", fg, bg,
+                                       dot_color=fg), 2))
+        return W.box(height=48, child=g, h="stretch")
+
+    def _input_values_card(self) -> object:
+        inner = self._card_frame(
+            "输入数据值",
+            "OSC 输入参数与传感器实时数值",
+            symbol="Contact",
+            trailing=nav.link("参数映射", "link"),
+        )
+        table_head = W.grid(W.star(1.4), W.fixed(64), W.star(1), W.fixed(74))
+        gap = Thickness(12, 0, 0, 0)
+        for label, col in (("参数", 0), ("来源", 1), ("当前值", 2), ("时间", 3)):
+            cell = W.text(label, size=12, color="text3", margin=gap if col else None)
+            table_head.Children.Append(W.put(cell, col))
         inner.Children.Append(table_head)
+        inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
+
+        rows = W.stack(spacing=0)
+        lines = live.input_value_rows(self.shell.engine, self.shell.state)
+        if not lines:
+            rows.Children.Append(W.box(height=36, child=W.text(
+                "（暂无输入数据：桥接未运行或 VRChat 未发送）",
+                size=12, color="text3", v="center")))
+        for i, line in enumerate(lines):
+            if i:
+                rows.Children.Append(W.divider())
+            rows.Children.Append(self._input_value_row(line))
         inner.Children.Append(rows)
         return W.card(inner)
 
-    def _osc_row(self, line: dict):
-        g = W.grid(W.star(2), W.fixed(56), W.fixed(96), W.star(2))
+    def _input_value_row(self, line: dict) -> object:
+        g = W.grid(W.star(1.4), W.fixed(64), W.star(1), W.fixed(74))
         gap = Thickness(12, 0, 0, 0)
-        g.Children.Append(W.put(W.text(line["address"], size=12, color="text2",
+        g.Children.Append(W.put(W.text(line["name"], size=12, color="text2",
                                        trimming=True, v="center"), 0))
-        g.Children.Append(W.put(W.text(line["vtype"], size=11, color="text3",
+        g.Children.Append(W.put(W.text(line["kind"], size=11, color="text3",
                                        margin=gap, v="center"), 1))
         g.Children.Append(W.put(W.text(line["value"], size=13, bold=W.SEMIBOLD,
                                        margin=gap, v="center"), 2))
-        meter = W.box(margin=gap, child=W.meter(line["percent"], width=140),
+        g.Children.Append(W.put(W.text(line["age"], size=11, color="text3",
+                                       margin=gap, v="center"), 3))
+        return W.box(height=34, child=g)
+
+    def _output_values_card(self) -> object:
+        inner = self._card_frame(
+            "输出数据值",
+            "设备输出通道的实时强度与波形",
+            symbol="Sync",
+            trailing=nav.link("参数映射", "link"),
+        )
+        table_head = W.grid(W.star(1.4), W.fixed(88), W.star(1), W.star(1))
+        gap = Thickness(12, 0, 0, 0)
+        for label, col in (("通道", 0), ("强度", 1), ("幅度", 2), ("波形", 3)):
+            cell = W.text(label, size=12, color="text3", margin=gap if col else None)
+            table_head.Children.Append(W.put(cell, col))
+        inner.Children.Append(table_head)
+        inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
+
+        rows = W.stack(spacing=0)
+        lines = live.output_value_rows(self.shell.engine, self.shell.state)
+        if not lines:
+            rows.Children.Append(W.box(height=36, child=W.text(
+                "（未接入输出设备）", size=12, color="text3", v="center")))
+        for i, line in enumerate(lines):
+            if i:
+                rows.Children.Append(W.divider())
+            rows.Children.Append(self._output_value_row(line))
+        inner.Children.Append(rows)
+        return W.card(inner)
+
+    def _output_value_row(self, line: dict) -> object:
+        g = W.grid(W.star(1.4), W.fixed(88), W.star(1), W.star(1))
+        gap = Thickness(12, 0, 0, 0)
+        g.Children.Append(W.put(W.text(line["name"], size=12, color="text2",
+                                       trimming=True, v="center"), 0))
+        g.Children.Append(W.put(W.text(line["value"], size=13, bold=W.SEMIBOLD,
+                                       margin=gap, v="center"), 1))
+        meter = W.box(margin=gap, child=W.meter(line["percent"], width=110),
                       v="center", h="left")
-        g.Children.Append(W.put(meter, 3))
-        return W.box(height=36, child=g)
+        g.Children.Append(W.put(meter, 2))
+        g.Children.Append(W.put(W.text(line["wave"], size=11, color="text3",
+                                       margin=gap, trimming=True, v="center"), 3))
+        return W.box(height=34, child=g)
 
 def _gap(el, left: float):
     el.Margin = Thickness(left, 0, 0, 0)
     return el
-
-def _spacer():
-    return W.box(height=1, h="stretch")

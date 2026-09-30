@@ -1,0 +1,8 @@
+{
+  "launched": true,
+  "status_text": "未连接",
+  "log_lines": 1,
+  "wave_count": 25,
+  "slider_max": 100.0,
+  "osc_toggle": true
+}

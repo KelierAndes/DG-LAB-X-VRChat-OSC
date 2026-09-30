@@ -19,6 +19,8 @@ OVC_BUTTON_BITS = [
     (8, "Up"), (9, "Down"), (10, "Left"), (11, "Right"),
     (12, "B"), (13, "A"), (14, "G"), (15, "D"),
 ]
+# 内置动作（与 Engine._OVC_BUTTON_ACTIONS 一一对应）；模块动作（如 OSC）由
+# button_actions(engine) 动态追加，随模块装卸出现与消失。
 BUTTON_ACTIONS = [
     ("none", "无"),
     ("a_strength_up", "A 通道强度 +10"), ("a_strength_down", "A 通道强度 -10"),
@@ -28,9 +30,25 @@ BUTTON_ACTIONS = [
     ("b_strength_zero", "B 通道强度 归0"),
     ("b_wave_up", "B 切换上一个波形"), ("b_wave_down", "B 切换下一个波形"),
     ("fire", "持续开火 (按住开火)"), ("estop", "急停"),
-    ("osc", "发送 OSC 参数…"), ("key", "模拟键盘按键…"),
 ]
+KEY_BINDING_ACTION = ("key", "模拟键盘按键…")
 BUTTON_ACTION_LABELS = dict(BUTTON_ACTIONS)
+
+
+def button_actions(engine) -> list[tuple[str, str]]:
+    """绑定选择框的全部动作项：内置 + 键盘注入 + 已加载模块注册的动作。"""
+    items = list(BUTTON_ACTIONS)
+    items.append(KEY_BINDING_ACTION)
+    try:
+        for action in engine.modules.button_actions():
+            items.append((action.key, action.label))
+    except Exception:
+        pass
+    return items
+
+
+def button_action_labels(engine) -> dict[str, str]:
+    return dict(button_actions(engine))
 
 BACKEND_LABELS = {
     "none": "未连接",
@@ -198,7 +216,11 @@ def osc_probe_card(engine) -> dict:
         return {"value": "已停止", "unit": "", "label": label, "symbol": "Sync",
                 "accent": False, "detail": ["桥接未运行", "联动页可开启"]}
     last = getattr(osc, "last_rx", None)
-    in_port = engine.config["osc"].get("in_port", 9001)
+    in_port = 9001
+    try:
+        in_port = int(engine.modules.settings_for("osc_bridge").get("in_port", 9001))
+    except Exception:
+        pass
     if last is not None and time.monotonic() - last <= 30.0:
         age = max(0, time.monotonic() - last)
         count = getattr(osc, "rx_count", 0) or 0
@@ -210,20 +232,184 @@ def osc_probe_card(engine) -> dict:
             "detail": [f"监听 :{in_port}", "未收到数据"]}
 
 
+def link_counts(engine, state: EngineState) -> dict:
+    """输入/输出链路计数与明细。
+
+    输入链路：控制与遥测进入应用的路径（OSC 输入、负鼠按键绑定、灵猫传感器）。
+    输出链路：应用向外下发数据的路径（OSC 输出、每台已接入输出设备）。
+    """
+    osc_on = engine.osc is not None and getattr(engine.osc, "_running", False)
+    inputs: list[tuple[str, str]] = []
+    outputs: list[tuple[str, str]] = []
+    if osc_on:
+        inputs.append(("VRChat OSC 输入", "头像参数 → 设备控制"))
+        outputs.append(("VRChat OSC 输出", "设备数值 → 头像参数"))
+    try:
+        bindings = engine.ovc_bindings()
+        profile = engine.config.get("ble", {}).get("ovc_profile", "")
+    except Exception:
+        bindings, profile = {}, ""
+    bound = sum(1 for v in bindings.values() if v and v != "none")
+    if bound:
+        inputs.append(("负鼠物理按键", f"配置 {profile or '默认'} · {bound} 个绑定"))
+    for sid in sorted(state.slots):
+        slot = state.slots[sid]
+        name = slot.name or slot.type or sid
+        if family_of(slot.type) == "BMTR":
+            inputs.append((f"{name} 传感", "气压 / 边缘状态遥测"))
+        elif slot.is_output_device:
+            outputs.append((name, "强度 / 波形下发"))
+    return {"input": inputs, "output": outputs}
+
+
+def _stat_card(value: str, unit: str, label: str, *, symbol: str, accent: bool,
+               trend: str = "", detail: list[str] | None = None) -> dict:
+    card = {"value": value, "unit": unit, "label": label, "symbol": symbol,
+            "accent": accent, "trend": trend}
+    if detail:
+        card["detail"] = detail
+    return card
+
+
 def stats(engine, log_buffer: LogBuffer) -> list[dict]:
     state = engine.get_state()
     devices = state.slots
     outputs = sum(1 for s in devices.values() if s.is_output_device)
-    osc_on = engine.osc is not None and getattr(engine.osc, "_running", False)
-    osc_cfg = engine.config["osc"]
-    ports = f"{osc_cfg.get('out_port', 9000)} → {osc_cfg.get('in_port', 9001)}"
+    links = link_counts(engine, state)
+
+    def detail_lines(items: list[tuple[str, str]]) -> list[str]:
+        labels = [label for label, _ in items]
+        if len(labels) > 3:
+            labels = labels[:2] + [f"等共 {len(labels)} 条"]
+        return labels or ["未启用"]
+
     return [
-        {"value": str(len(devices)), "unit": "台", "label": "已连接设备",
-         "trend": BACKEND_LABELS.get(engine.backend_kind, engine.backend_kind),
-         "symbol": "CellPhone", "accent": True},
-        {"value": str(outputs), "unit": f"/ {max(len(devices), outputs)}", "label": "输出设备",
-         "trend": f"{len(devices) - outputs} 台传感器", "symbol": "Remote", "accent": False},
-        {"value": "运行中" if osc_on else "已停止", "unit": "", "label": "OSC 桥接",
-         "trend": ports, "symbol": "Sync", "accent": osc_on},
-        osc_probe_card(engine),
+        _stat_card(str(len(devices)), "台", "已连接设备", symbol="CellPhone",
+                   accent=True,
+                   trend=BACKEND_LABELS.get(engine.backend_kind, engine.backend_kind)),
+        _stat_card(str(outputs), f"/ {max(len(devices), outputs)}", "输出设备",
+                   symbol="Remote", accent=False,
+                   trend=f"{len(devices) - outputs} 台传感器"),
+        _stat_card(str(len(links["input"])), "条", "已启用输入链路",
+                   symbol="Download", accent=bool(links["input"]),
+                   detail=detail_lines(links["input"])),
+        _stat_card(str(len(links["output"])), "条", "已启用输出链路",
+                   symbol="Upload", accent=bool(links["output"]),
+                   detail=detail_lines(links["output"])),
     ]
+
+
+def input_channel_rows(engine, state: EngineState) -> list[dict]:
+    """输入通道清单（含未启用的，界面据 enabled 显示状态胶囊）。"""
+    osc_on = engine.osc is not None and getattr(engine.osc, "_running", False)
+    rows = [{
+        "name": "VRChat OSC 输入",
+        "detail": "头像参数 → 首个同类型设备（强度/波形/开火/急停）",
+        "enabled": osc_on,
+        "hint": "" if osc_on else "在联动页开启 OSC 桥接",
+    }]
+    try:
+        bindings = engine.ovc_bindings()
+        profile = engine.config.get("ble", {}).get("ovc_profile", "")
+    except Exception:
+        bindings, profile = {}, ""
+    bound = sum(1 for v in bindings.values() if v and v != "none")
+    rows.append({
+        "name": "负鼠物理按键",
+        "detail": (f"配置 {profile or '默认'} · {bound} 个绑定生效"
+                   if bound else "当前配置无绑定"),
+        "enabled": bound > 0,
+        "hint": "" if bound else "在控制页负鼠卡片绑定按键动作",
+    })
+    for sid in sorted(state.slots):
+        slot = state.slots[sid]
+        if family_of(slot.type) == "BMTR":
+            rows.append({
+                "name": f"{slot.name or slot.type or sid} 传感器",
+                "detail": "气压 / 边缘状态遥测（输入数据源）",
+                "enabled": True, "hint": "",
+            })
+    return rows
+
+
+def channel_alive_text(status: int) -> str:
+    if status in (0, 2):
+        return "正常"
+    if status == 1:
+        return "异常"
+    return f"状态 {status}"
+
+
+def output_channel_rows(state: EngineState) -> list[dict]:
+    """输出通道行：每台输出设备每通道一条，含探活（channel_status）。"""
+    rows: list[dict] = []
+    for sid in sorted(state.slots):
+        slot = state.slots[sid]
+        if not slot.is_output_device:
+            continue
+        name = slot.name or slot.type or sid
+        for ch in ("A", "B"):
+            out = output_row(slot, ch)
+            status = int(slot.channel_status.get(ch, 0))
+            rows.append({
+                "device": name, "channel": ch,
+                "value": out["value"], "limit": out["limit"],
+                "percent": out["percent"],
+                "alive": status in (0, 2),
+                "alive_text": channel_alive_text(status),
+            })
+    return rows
+
+
+def _input_value_text(value) -> str:
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, float):
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def input_value_rows(engine, state: EngineState) -> list[dict]:
+    """输入数据值：OSC 最近收到的参数 + 灵猫传感器遥测。"""
+    rows: list[dict] = []
+    bridge = engine.osc
+    if bridge is not None:
+        for rec in bridge.recent_inputs():
+            rows.append({"name": rec["param"], "kind": "OSC 参数",
+                         "value": _input_value_text(rec["value"]),
+                         "age": f"{rec['age']:.0f} 秒前"})
+    for sid in sorted(state.slots):
+        slot = state.slots[sid]
+        if family_of(slot.type) != "BMTR":
+            continue
+        pressure = slot.pressure if slot.pressure is not None else 0.0
+        rows.append({"name": f"{slot.name or slot.type or sid} Pressure",
+                     "kind": "传感器", "value": f"{pressure:.2f} kPa", "age": "实时"})
+        edge = slot.edge_state if slot.edge_state is not None else 0
+        rows.append({"name": f"{slot.name or slot.type or sid} EdgeState",
+                     "kind": "传感器", "value": EDGE_STATES.get(edge, str(edge)),
+                     "age": "实时"})
+    return rows
+
+
+def output_value_rows(engine, state: EngineState) -> list[dict]:
+    """输出数据值：每台输出设备各通道的当前强度与波形。"""
+    try:
+        waves = engine.wave_selection()
+    except Exception:
+        waves = {"A": SILENT, "B": SILENT}
+    rows: list[dict] = []
+    for sid in sorted(state.slots):
+        slot = state.slots[sid]
+        if not slot.is_output_device:
+            continue
+        name = slot.name or slot.type or sid
+        for ch in ("A", "B"):
+            out = output_row(slot, ch)
+            rows.append({
+                "name": f"{name} · {ch}",
+                "value": f"{out['value']}/{out['limit']}",
+                "percent": out["percent"],
+                "wave": wave_label(waves.get(ch, ""), family_of(slot.type)),
+            })
+    return rows

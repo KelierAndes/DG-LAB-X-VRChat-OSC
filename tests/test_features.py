@@ -412,12 +412,12 @@ class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("默认", ble["ovc_profiles"])
             self.assertEqual(ble["ovc_profile"], "默认")
             legacy = ble["ovc_profiles"]["默认"]
-            self.assertEqual(engine._ovc_bindings().get("13"), legacy.get("13"))
+            self.assertEqual(engine.ovc_bindings().get("13"), legacy.get("13"))
             ble["ovc_profiles"]["配置2"] = {"13": "estop"}
             ble["ovc_profile"] = "配置2"
-            self.assertEqual(engine._ovc_bindings()["13"], "estop")
+            self.assertEqual(engine.ovc_bindings()["13"], "estop")
             ble["ovc_profile"] = "不存在的配置"
-            self.assertEqual(engine._ovc_bindings().get("13"),
+            self.assertEqual(engine.ovc_bindings().get("13"),
                              ble["ovc_profiles"]["默认"].get("13"))
         finally:
             engine.stop()
@@ -819,10 +819,9 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
 
         from ui import live
 
-        self.assertEqual(tuple(k for k, _ in live.BUTTON_ACTIONS[:-2]),
+        self.assertEqual(tuple(k for k, _ in live.BUTTON_ACTIONS),
                          app_module.Engine._OVC_BUTTON_ACTIONS)
-        self.assertEqual([k for k, _ in live.BUTTON_ACTIONS[-2:]],
-                         ["osc", "key"])
+        self.assertEqual(live.button_actions(engine=None)[-1][0], "key")
 
 
     async def test_binding_strength_single_channel(self):
@@ -851,6 +850,7 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_binding_osc_pass_through(self):
         import app as app_module
+        from plugins import ButtonAction
 
         engine = app_module.Engine()
         engine.start()
@@ -860,10 +860,28 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
             class FakeOsc:
                 _running = True
 
-                def send_value(self, address, value):
-                    sent.append((address, value))
+                def __init__(self, sink):
+                    self.sink = sink
 
-            engine.osc = FakeOsc()
+                def send_value(self, address, value):
+                    self.sink.append((address, value))
+
+            class FakeModule:
+                id = "osc_bridge"
+
+                def __init__(self, sink):
+                    self.bridge = FakeOsc(sink)
+
+                def is_running(self):
+                    return True
+
+                def button_actions(self):
+                    return [ButtonAction(
+                        "osc", "发送 OSC 参数…",
+                        on_press=lambda slot, arg: self.bridge.send_value(arg, 1),
+                        on_release=lambda slot, arg: self.bridge.send_value(arg, 0))]
+
+            engine.modules.register_instance("osc_bridge", FakeModule(sent))
             bindings = (engine.config.setdefault("ble", {})
                         .setdefault("ovc_profiles", {}).setdefault("默认", {}))
             engine.config["ble"]["ovc_profile"] = "默认"
@@ -901,7 +919,7 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
             bindings["13"] = "b_wave_down"
             engine._on_ovc_button("addr-ovc", 13)
             await asyncio.sleep(0.3)
-            from vrc.osc_bridge import wave_order
+            from modules.osc_bridge.bridge import wave_order
             self.assertEqual(waves, [("A", CONTINUOUS),
                                      ("B", wave_order("OVC")[-1])])
         finally:
@@ -1069,7 +1087,7 @@ class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
             await engine._step_device_wave("s1", "A", +1)
             self.assertEqual(waves, [("A", CONTINUOUS)])
             await engine._step_device_wave("s1", "B", -1)
-            from vrc.osc_bridge import wave_order
+            from modules.osc_bridge.bridge import wave_order
             self.assertEqual(waves[-1], ("B", wave_order("COYOTE")[-1]))
             await engine._step_device_wave("s1", "A", -1)
             self.assertEqual(waves[-1], ("A", SILENT))

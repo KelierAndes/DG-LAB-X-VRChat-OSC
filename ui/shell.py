@@ -20,6 +20,7 @@ from ui.dashboard_page import DashboardPage
 from ui.link_page import LinkPage
 from ui.live import LogBuffer
 from ui.log_page import LogPage
+from ui.modules_page import ModulesPage
 from ui.paths import xaml
 from ui.settings_page import SettingsPage
 
@@ -30,6 +31,7 @@ PAGE_CLASSES = {
     "connect": ConnectPage,
     "control": ControlPage,
     "link": LinkPage,
+    "modules": ModulesPage,
     "log": LogPage,
     "settings": SettingsPage,
 }
@@ -39,6 +41,7 @@ NAV_LABELS = {
     "connect": ("连接", "Link"),
     "control": ("控制", "Play"),
     "link": ("联动", "Switch"),
+    "modules": ("模块", "Download"),
     "log": ("日志", "List"),
 }
 
@@ -61,6 +64,10 @@ class MainWindow(XamlClass, Window):
         self._dark = bool(engine.config.get("ui", {}).get("dark", True))
 
         self.AppWindow.Resize(WINDOW_SIZE)
+        try:
+            self.AppWindow.Title = "DGStudio"
+        except Exception:
+            pass
         self._apply_theme(initial=True)
         nav.bind(self)
         self._build_nav()
@@ -71,6 +78,9 @@ class MainWindow(XamlClass, Window):
         engine.events.on("saved_devices", lambda devs: self._notify("connect"))
         engine.events.on("ovc_button", self._on_ovc_button)
         engine.events.on("ovc_button_up", self._on_ovc_button_up)
+        engine.events.on("modules_changed", self._on_modules_changed)
+        engine.events.on("binding_modules_missing", self._on_binding_missing)
+        self._missing_prompt: dict | None = None
 
         timer = self.DispatcherQueue.CreateTimer()
         timer.Interval = TimeSpan(Duration=100_000)
@@ -78,11 +88,14 @@ class MainWindow(XamlClass, Window):
         timer.Tick += self._on_tick
         timer.Start()
 
+        async def _startup_check() -> None:
+            # 引擎的模块自启动可能早于窗口订阅事件，这里兜底再查一次映射
+            engine._check_missing_bindings()
+
+        self.submit(_startup_check())
+
         self.Closed += self._on_closed
         self.Activate()
-
-        if engine.config["osc"].get("enabled"):
-            self.submit(engine.osc_start())
 
     def set_image_bytes(self, image, data: bytes) -> None:
         async def _run():
@@ -143,6 +156,55 @@ class MainWindow(XamlClass, Window):
 
         self.ui_queue.put(_run)
 
+    def _notify_all(self) -> None:
+        """重建全部已构造页面（模块装卸等影响多页的变更用）。"""
+        for page in list(self._pages.values()):
+            method = getattr(page, "on_notify", None)
+            if method is not None:
+                try:
+                    method()
+                except Exception as exc:
+                    self.logs.append(f"页面刷新失败: {exc!r}")
+
+    def _on_modules_changed(self, module_id: str) -> None:
+        def _run():
+            self._notify_all()
+
+        self.ui_queue.put(_run)
+
+    def _on_binding_missing(self, payload: dict) -> None:
+        def _run():
+            self._missing_prompt = payload
+
+        self.ui_queue.put(_run)
+
+    async def _handle_missing_bindings(self, payload: dict) -> None:
+        from ui.dialogs import confirm_dialog
+
+        module_ids = payload.get("modules") or []
+        bindings = payload.get("bindings") or {}
+        names = []
+        for mid in module_ids:
+            meta = self.engine.modules.meta(mid) or {}
+            names.append(meta.get("name") or mid)
+        if names:
+            lines = "\n".join(f"· {name}" for name in names)
+            message = (f"当前的负鼠按键映射配置使用了以下未启用模块提供的动作：\n{lines}\n\n"
+                       "启用相关模块后保留映射；拒绝加载则相关绑定会重置为「无动作」并保存。")
+            ok = await confirm_dialog(self, "按键映射需要启用模块", message,
+                                      primary="启用并加载", close="拒绝加载")
+            if ok:
+                for mid in module_ids:
+                    self.submit(self.engine.modules.install(mid))
+                return
+        else:
+            await confirm_dialog(
+                self, "按键映射包含未知动作",
+                "当前按键映射包含无法识别的动作，相关绑定将重置为「无动作」并保存。",
+                close="知道了")
+        self.engine.reset_bindings(list(bindings))
+        self._notify_all()
+
     def _on_tick(self, sender, args) -> None:
         while True:
             try:
@@ -161,6 +223,10 @@ class MainWindow(XamlClass, Window):
                     tick()
                 except Exception as exc:
                     self.logs.append(f"页面刷新失败: {exc!r}")
+        if (self._missing_prompt is not None
+                and self.RootGrid.XamlRoot is not None):
+            payload, self._missing_prompt = self._missing_prompt, None
+            asyncui.create_task(self._handle_missing_bindings(payload))
 
     def goto(self, tag: str) -> None:
         item = self._items.get(tag)

@@ -17,7 +17,8 @@ from dglab.waves import (
     parse_frame,
     wire_to_logical_freq,
 )
-from vrc.osc_bridge import OscConfig, _to_int, _truthy
+from modules.osc_bridge.bridge import OscConfig
+from dglab.params import _clamp as _to_int, _truthy
 
 
 class WaveTests(unittest.TestCase):

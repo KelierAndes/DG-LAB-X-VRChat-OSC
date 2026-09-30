@@ -1,0 +1,66 @@
+{
+  "name": "coyote-game-hub-server",
+  "version": "2.0.0",
+  "description": "战败惩罚——郊狼游戏控制器",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "update-lock": "npm i --package-lock-only",
+    "build:schema": "tsx cli/build-schema.js",
+    "build:ts": "tsc",
+    "build": "npm run build:schema && npm run build:ts",
+    "build:bundled": "ncc build dist/index.js -o dist-bundled --license licenses.txt"
+  },
+  "bin": "dist/index.js",
+  "pkg": {
+    "scripts": [
+      "dist/**/*"
+    ],
+    "assets": []
+  },
+  "keywords": [
+    "DG-Lab",
+    "obs"
+  ],
+  "author": "Hyperzlib",
+  "license": "MIT",
+  "imports": {
+    "#app/*": "./dist/*"
+  },
+  "devDependencies": {
+    "@bpinternal/zod-to-json-schema": "^3.22.5",
+    "@types/blocked-at": "^1.0.4",
+    "@types/js-yaml": "^4.0.9",
+    "@types/koa": "^2.15.0",
+    "@types/koa-logger": "^3.1.5",
+    "@types/koa-router": "^7.4.8",
+    "@types/koa-static": "^4.0.4",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
+    "@vercel/ncc": "^0.38.3",
+    "ts-json-schema-generator": "^2.4.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@hyperzlib/node-reactive-config": "^1.1.1",
+    "@koa/bodyparser": "^5.1.2",
+    "blocked-at": "^1.2.0",
+    "got": "^14.4.7",
+    "js-yaml": "^4.1.0",
+    "json5": "^2.2.3",
+    "koa": "^2.16.1",
+    "koa-logger": "^4.0.0",
+    "koa-router": "^12.0.1",
+    "koa-static": "^5.0.0",
+    "koa-swagger-decorator": "^2.2.1",
+    "lru-cache": "^10.4.3",
+    "path-to-regexp": "^7.2.0",
+    "reflect-metadata": "^0.2.2",
+    "sqlite3": "^5.1.7",
+    "typeorm": "^0.3.25",
+    "uuid": "^10.0.0",
+    "ws": "^8.18.3"
+  }
+}

@@ -1,0 +1,20 @@
+{
+    "repo": "hyperzlib/DG-Lab-Coyote-Game-Hub",
+    "version": "2.0.0",
+    "description": "1. 将API重写为OpenAPI规范的MCP API\n2. 支持Model Control Protocol (MCP) API，现在可以使用支持MCP的AI客户端连接",
+    "releaseFile": {
+        "windows": "coyote-game-hub-windows-amd64-dist.zip",
+        "linux": "coyote-game-hub-nodejs-server.zip",
+        "mac": "coyote-game-hub-nodejs-server.zip"
+    },
+    "apiMirrors": [
+        {
+            "version": "https://raw.githubusercontent.com/{repo}/master/version.json",
+            "release": "https://github.com/{repo}/releases/download/v{version}/{file}"
+        },
+        {
+            "version": "https://mirror.ghproxy.com/https://raw.githubusercontent.com/{repo}/master/version.json",
+            "release": "https://mirror.ghproxy.com/https://github.com/{repo}/releases/download/v{version}/{file}"
+        }
+    ]
+}

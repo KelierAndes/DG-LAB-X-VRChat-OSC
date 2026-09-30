@@ -25,6 +25,7 @@ __all__ = [
     "FrameCycle",
     "ovc_channel_pattern",
     "waveform_dict_for",
+    "wave_order",
 ]
 
 WIRE_FREQ_MIN = 10
@@ -132,3 +133,10 @@ CONTINUOUS = "__CONTINUOUS__"
 SILENT = "__SILENT__"
 CONTINUOUS_FRAMES = [build_frame([40, 40, 40, 40], [100, 100, 100, 100])]
 SILENT_FRAMES = [build_frame([10, 10, 10, 10], [0, 0, 0, 0])]
+
+
+def wave_order(family: str = "COYOTE") -> list[str]:
+    """设备家族可用的波形枚举序列（静默/持续在前，供步进与直接跳变使用）。"""
+    if family == "OVC":
+        return [SILENT, CONTINUOUS] + [w.value for w in OvcWaveform]
+    return [SILENT, CONTINUOUS] + [w.value for w in CoyoteWaveform]

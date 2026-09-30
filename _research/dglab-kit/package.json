@@ -1,0 +1,37 @@
+{
+  "name": "dglab-kit",
+  "version": "1.0.5",
+  "type": "module",
+  "homepage": "https://github.com/dungeonlab-open/dglab-kit.git",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rslib",
+    "check": "biome check --write",
+    "dev": "rslib --watch",
+    "format": "biome format --write",
+    "lint": "biome check --write",
+    "test:types": "tsc --ignoreConfig --noEmit --target ES2022 --module ESNext --moduleResolution bundler --lib ES2022,DOM"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.15",
+    "@rslib/core": "^0.22.1",
+    "@types/node": "^24.13.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.4",
+    "ws": "^8.21.0"
+  }
+}

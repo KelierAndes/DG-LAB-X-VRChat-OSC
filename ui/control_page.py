@@ -5,6 +5,7 @@ import math
 import time
 from collections import deque
 
+from win32more import asyncui
 from win32more.Microsoft.UI.Xaml import TextAlignment, Thickness, Visibility
 from win32more.Microsoft.UI.Xaml.Controls import (
     Canvas,
@@ -29,6 +30,7 @@ from dglab.state import family_of
 from dglab import keys as keyboard_keys
 from ui import charts
 from ui import live, theme, widgets as W
+from ui.dialogs import confirm_dialog, prompt_text
 from ui.paths import xaml
 
 class CardView:
@@ -81,6 +83,9 @@ class ControlPage(XamlClass, Page):
         self._last_value_render = 0.0
         self._glow_state: dict[int, tuple] = {}
         self.LoadComponentFromFile(xaml("ControlPage.xaml"), encoding="utf-8")
+        self.rebuild()
+
+    def on_notify(self) -> None:
         self.rebuild()
 
     def tick(self) -> None:
@@ -450,11 +455,24 @@ class ControlPage(XamlClass, Page):
             index = combo.SelectedIndex
             if not (0 <= index < len(names)):
                 return
-            if ble.get("ovc_profile") == names[index]:
+            target = names[index]
+            if ble.get("ovc_profile") == target:
                 return
-            ble["ovc_profile"] = names[index]
-            engine.save_config()
-            self.rebuild()
+            missing = engine.binding_missing_modules(profiles.get(target) or {})
+            if not missing:
+                ble["ovc_profile"] = target
+                engine.save_config()
+                self.rebuild()
+                return
+            # 目标配置引用了未启用模块的动作：先还原选择，再弹窗询问
+            module_ids = engine.modules_for_bindings(missing)
+            self._updating = True
+            try:
+                combo.SelectedIndex = names.index(active)
+            finally:
+                self._updating = False
+            asyncui.create_task(
+                self._confirm_load_profile(target, module_ids, missing))
 
         combo.SelectionChanged += _switch
 
@@ -471,13 +489,69 @@ class ControlPage(XamlClass, Page):
 
         new_btn = W.button("＋新建", width=64, height=32, v="center", on_click=_new)
         self._bv_tip(new_btn, "以当前配置文件的映射为模板新建一份，并切换过去")
+
+        def _rename(sender, args):
+            asyncui.create_task(self._rename_profile_flow())
+
+        rename_btn = W.button("✎改名", width=64, height=32, v="center",
+                              on_click=_rename)
+        self._bv_tip(rename_btn, "重命名当前按键映射配置文件")
+
         row = W.stack(horizontal=True, spacing=6, v="center")
         row.Children.Append(combo)
         row.Children.Append(new_btn)
+        row.Children.Append(rename_btn)
         cell = W.stack(spacing=4)
         cell.Children.Append(W.text("按键映射配置文件 (负鼠)", size=11, color="text3"))
         cell.Children.Append(row)
         return cell
+
+    async def _confirm_load_profile(self, target: str, module_ids: list[str],
+                                    missing: dict) -> None:
+        engine = self.shell.engine
+        if module_ids:
+            names = []
+            for mid in module_ids:
+                meta = engine.modules.meta(mid) or {}
+                names.append(meta.get("name") or mid)
+            lines = "\n".join(f"· {name}" for name in names)
+            message = (f"配置「{target}」的按键映射使用了以下未启用模块提供的动作：\n{lines}\n\n"
+                       "启用相关模块后加载该配置；拒绝则保持当前配置不变。")
+            ok = await confirm_dialog(self.shell, "加载配置需要启用模块", message,
+                                      primary="启用并加载", close="拒绝加载")
+            if not ok:
+                self.shell.logs.append(f"已拒绝加载配置「{target}」")
+                return
+            for mid in module_ids:
+                self.shell.submit(engine.modules.install(mid))
+        else:
+            await confirm_dialog(
+                self.shell, "配置包含未知动作",
+                f"配置「{target}」包含无法识别的按键动作，无法加载。"
+                "可切换到该配置后将相关绑定改回其他动作。",
+                close="知道了")
+            return
+        ble = engine.config.setdefault("ble", {})
+        ble["ovc_profile"] = target
+        engine.save_config()
+        self.rebuild()
+
+    async def _rename_profile_flow(self) -> None:
+        engine = self.shell.engine
+        ble = engine.config.setdefault("ble", {})
+        profiles = ble.setdefault("ovc_profiles", {})
+        old = ble.get("ovc_profile") or next(iter(profiles), "默认")
+        new = await prompt_text(self.shell, "重命名配置文件",
+                                f"将按键映射配置「{old}」重命名为：",
+                                initial=old, primary="重命名")
+        if new is None or new == old:
+            return
+        error = engine.rename_ovc_profile(old, new)
+        if error:
+            self.shell.logs.append(f"重命名失败：{error}")
+            return
+        self.shell.logs.append(f"配置文件已重命名：{old} → {new}")
+        self.rebuild()
 
     # ---- 负鼠绑定块：官方离线模式页 1:1 复刻 ----
     # 坐标一律取官方截图像素系（647×291），经 _BV_SCALE 缩放平移后画到画布上。
@@ -833,7 +907,7 @@ class ControlPage(XamlClass, Page):
         view.bindings[bit] = label
 
         flyout = MenuFlyout()
-        for key, text_label in live.BUTTON_ACTIONS:
+        for key, text_label in live.button_actions(self.shell.engine):
             item = MenuFlyoutItem()
             item.Text = text_label
             item.Click += self._make_binding_click(view, bit, key)
@@ -937,7 +1011,7 @@ class ControlPage(XamlClass, Page):
         if key.startswith("key:"):
             name = key[4:].strip()
             return f"键盘 {name}" if name else "键盘按键"
-        for action_key, label in live.BUTTON_ACTIONS:
+        for action_key, label in live.button_actions(self.shell.engine):
             if action_key == key:
                 return label
         return key

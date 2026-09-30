@@ -79,11 +79,21 @@ class StateEvents:
     def __init__(self) -> None:
         self._subs: dict[str, list[Callable]] = {}
 
-    def on(self, event: str, cb: Callable) -> None:
+    def on(self, event: str, cb: Callable) -> Callable:
         self._subs.setdefault(event, []).append(cb)
+        return cb
+
+    def off(self, event: str, cb: Callable) -> None:
+        subs = self._subs.get(event)
+        if subs is None:
+            return
+        try:
+            subs.remove(cb)
+        except ValueError:
+            pass
 
     def emit(self, event: str, *args) -> None:
-        for cb in self._subs.get(event, ()):
+        for cb in list(self._subs.get(event, ())):
             try:
                 cb(*args)
             except Exception:

@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from concurrent.futures import Future
 from typing import Any
 
@@ -20,8 +21,8 @@ from dglab.socket_v3 import DEFAULT_V3_RELAY, SocketV3Client
 from dglab.socket_v4 import DEFAULT_V4_RELAY, SocketV4Client
 from dglab.state import EngineState, StateEvents, family_of
 from dglab.waves import (CONTINUOUS, COYOTE_WAVEFORMS, CoyoteWaveform, SILENT,
-                         resolve_wave_frames)
-from vrc.osc_bridge import OscBridge, OscConfig, wave_order
+                         resolve_wave_frames, wave_order)
+from plugins import PluginManager
 
 
 def _base_dir() -> str:
@@ -54,7 +55,6 @@ class Config(dict):
                 "14": "b_wave_up", "15": "b_strength_up",
             },
         },
-        "osc": dict(OscConfig.DEFAULTS),
         "relay": {"v4_port": 9998, "v3_port": 9999,
                   "v4_local": False, "v3_local": False},
         "device_settings": {},
@@ -76,9 +76,7 @@ class Config(dict):
         except (OSError, json.JSONDecodeError):
             return
         for key, value in data.items():
-            if key == "osc" and isinstance(value, dict):
-                self["osc"].update(value)
-            elif isinstance(value, dict) and isinstance(self.get(key), dict):
+            if isinstance(value, dict) and isinstance(self.get(key), dict):
                 self[key].update(value)
             else:
                 self[key] = value
@@ -96,7 +94,7 @@ import logging
 
 def _file_handler(base_dir: str) -> logging.FileHandler:
     handler = logging.FileHandler(
-        os.path.join(base_dir, "dglab_osc.log"), encoding="utf-8"
+        os.path.join(base_dir, "dgstudio.log"), encoding="utf-8"
     )
     handler.setFormatter(
         logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", "%Y-%m-%d %H:%M:%S")
@@ -105,7 +103,7 @@ def _file_handler(base_dir: str) -> logging.FileHandler:
 
 
 def _setup_file_logger(base_dir: str, enabled: bool = True) -> logging.Logger:
-    logger = logging.getLogger("dglab_osc")
+    logger = logging.getLogger("dgstudio")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if enabled and not any(
@@ -133,13 +131,15 @@ class Engine:
             "A": SILENT,
             "B": SILENT,
         }
-        self.osc: OscBridge | None = None
-        self._fire_holds: dict[str, dict] = {}
-        self._migrate_ovc_profiles()
+        self.events.on("log", self._file_only)
+        self.events.on("frame_log", lambda d, f: self.log_frame(d, f))
+        self.modules = PluginManager(self)
+        self._modules_ready = False
+        self.events.on("modules_changed", self._on_module_change)
         self.events.on("ovc_button", self._on_ovc_button)
         self.events.on("ovc_button_up", self._on_ovc_button_up)
-        self.events.on("frame_log", lambda d, f: self.log_frame(d, f))
-        self.events.on("log", self._file_only)
+        self._fire_holds: dict[str, dict] = {}
+        self._migrate_ovc_profiles()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -150,6 +150,7 @@ class Engine:
         if not self._loop_ready.wait(timeout=5.0):
             raise RuntimeError("engine loop failed to start")
         self.submit(self._reconnect_loop())
+        self.submit(self._startup_modules())
 
     def _run_loop(self) -> None:
         self.loop = asyncio.new_event_loop()
@@ -438,6 +439,70 @@ class Engine:
             value = self.config.get(key)
         return value
 
+    INTENSITY_PARAM_RANGES = {
+        "max_strength": (0, 200, int),
+        "strength_step": (1, 50, int),
+        "fire_strength": (0, 200, int),
+        "fire_duration_s": (0.1, 60.0, float),
+    }
+
+    def intensity_params(self, slot_id: str | None = None) -> dict:
+        """强度参数公开快照（模块/界面统一读取入口）。
+
+        返回 slot_id 对应设备（缺省解析为默认输出设备）的当前强度、上限、
+        探活状态、最大强度/步长/开火强度等全部强度相关参数。
+        """
+        state = self.get_state()
+        sid = self.resolve_slot(slot_id)
+        slot = state.slots.get(sid) if sid else None
+        return {
+            "slot_id": sid,
+            "connected": bool(slot is not None),
+            "strength": dict(slot.strength) if slot is not None else {"A": 0, "B": 0},
+            "strength_limit": (dict(slot.strength_limit) if slot is not None
+                               else {"A": 200, "B": 200}),
+            "channel_status": (dict(slot.channel_status) if slot is not None
+                               else {"A": 0, "B": 0}),
+            "max_strength": int(self.device_setting(sid, "max_strength") or 100),
+            "strength_step": self.device_step(sid),
+            "fire_strength": int(self.device_setting(sid, "fire_strength") or 0),
+            "fire_duration_s": float(self.device_setting(sid, "fire_duration_s") or 1.0),
+            "wave_duration_s": float(self.config.get("wave_duration_s", 10.0)),
+            "wave": self.wave_selection(),
+        }
+
+    def set_intensity_param(self, key: str, value, slot_id: str | None = None) -> None:
+        """强度参数公开写入口（max_strength/strength_step/fire_strength/fire_duration_s/wave_duration_s）。
+
+        slot_id 给出时写入该设备的独立覆盖（device_settings），否则写全局配置。
+        """
+        if key == "wave_duration_s":
+            try:
+                value = max(1.0, min(120.0, float(value)))
+            except (TypeError, ValueError):
+                raise ValueError(f"无效的 wave_duration_s: {value!r}") from None
+            self.config["wave_duration_s"] = value
+        elif key in self.INTENSITY_PARAM_RANGES:
+            low, high, cast = self.INTENSITY_PARAM_RANGES[key]
+            try:
+                value = max(low, min(high, cast(value)))
+            except (TypeError, ValueError):
+                raise ValueError(f"无效的 {key}: {value!r}") from None
+            if slot_id:
+                self.config.setdefault("device_settings", {}).setdefault(
+                    slot_id, {})[key] = value
+            else:
+                self.config[key] = value
+        else:
+            raise ValueError(f"未知的强度参数: {key}")
+        self.events.emit("intensity_params", self.intensity_params(slot_id))
+        self._log(f"强度参数 {key} → {value}"
+                  + (f" (设备 {slot_id})" if slot_id else " (全局)"))
+
+    def wave_selection(self) -> dict:
+        """当前选定的波形名（A/B 通道）。"""
+        return {ch: str(self._selected_wave.get(ch) or SILENT) for ch in ("A", "B")}
+
     async def set_strength(self, channel: str, value: int, slot_id: str | None = None) -> None:
         backend = self._require_backend()
         limit = int(self.device_setting(slot_id, "max_strength") or 100)
@@ -724,19 +789,110 @@ class Engine:
         if not ble.get("ovc_profile"):
             ble["ovc_profile"] = next(iter(ble["ovc_profiles"]), "默认")
 
-    def _ovc_bindings(self) -> dict[str, str]:
+    def ovc_bindings(self) -> dict[str, str]:
         """当前激活配置文件的按键映射 (旧 ovc_buttons 作为兜底)."""
         ble = self.config.get("ble", {})
         profiles = ble.get("ovc_profiles") or {}
         active = ble.get("ovc_profile") or next(iter(profiles), "默认")
         return profiles.get(active) or ble.get("ovc_buttons") or {}
 
-    def _on_ovc_button(self, slot_id: str, bit: int) -> None:
-        binding = self._ovc_bindings().get(str(bit), "none")
-        if binding.startswith("osc:"):
-            self._send_osc_binding(binding[4:], 1)
+    # ---- 负鼠按键映射配置文件：校验 / 重置 / 改名 ----
+
+    def binding_missing_modules(self, bindings: dict | None = None) -> dict[str, str]:
+        """返回引用了未加载模块动作的按键绑定 (bit → binding)。
+
+        内置动作与键盘注入 (key:) 视为始终可用；模块动作只有在对应模块
+        加载后才可用，卸载模块后相关绑定由界面提示启用模块或拒绝加载。
+        """
+        if bindings is None:
+            bindings = self.ovc_bindings()
+        missing: dict[str, str] = {}
+        for bit, binding in (bindings or {}).items():
+            binding = str(binding)
+            if not binding or binding == "none":
+                continue
+            key = binding.partition(":")[0]
+            if key == "key" or binding in self._OVC_BUTTON_ACTIONS:
+                continue
+            if self.modules.action(key) is not None:
+                continue
+            missing[str(bit)] = binding
+        return missing
+
+    def modules_for_bindings(self, bindings: dict) -> list[str]:
+        """绑定集合引用到的（可启用的）模块 id 列表。"""
+        module_ids = {self.modules.module_for_action(str(b).partition(":")[0])
+                      for b in bindings.values()}
+        return sorted(mid for mid in module_ids if mid)
+
+    def reset_bindings(self, bits, profile: str | None = None) -> None:
+        """把指定按键位的绑定重置为 none（拒绝加载引用未启用模块的映射时）。"""
+        ble = self.config.setdefault("ble", {})
+        profiles = ble.setdefault("ovc_profiles", {})
+        active = profile or ble.get("ovc_profile") or next(iter(profiles), "默认")
+        prof = profiles.setdefault(active, {})
+        for bit in bits:
+            prof[str(bit)] = "none"
+        self.config.save()
+        self._log(f"配置「{active}」中 {len(list(bits))} 个按键绑定已重置为无动作 "
+                  f"(引用未启用的模块)")
+
+    def rename_ovc_profile(self, old: str, new: str) -> str | None:
+        """重命名按键映射配置文件；成功返回 None，失败返回错误说明。"""
+        new = (new or "").strip()
+        ble = self.config.setdefault("ble", {})
+        profiles = ble.setdefault("ovc_profiles", {})
+        if old not in profiles:
+            return f"配置「{old}」不存在"
+        if not new:
+            return "名称不能为空"
+        if new == old:
+            return None
+        if new in profiles:
+            return f"配置「{new}」已存在"
+        ble["ovc_profiles"] = {(new if k == old else k): v
+                               for k, v in profiles.items()}
+        if ble.get("ovc_profile") == old:
+            ble["ovc_profile"] = new
+        self.config.save()
+        self._log(f"按键映射配置文件已重命名: {old} → {new}")
+        return None
+
+    async def _startup_modules(self) -> None:
+        await self.modules.autostart()
+        self._modules_ready = True
+        self._check_missing_bindings()
+
+    def _on_module_change(self, module_id: str) -> None:
+        """模块装卸钩子：卸载会新增「映射引用未启用模块」，立即重新校验。
+
+        安装只会消除缺失、不会产生新的缺失，故只在实例被移除时触发；
+        启动阶段（autostart 进行中）不校验，等启动完成统一检查一次。
+        """
+        if self._modules_ready and self.modules.instance(module_id) is None:
+            self._check_missing_bindings()
+
+    def _check_missing_bindings(self) -> None:
+        """启动时校验当前映射：引用未启用模块的动作则发事件交由界面处理。"""
+        missing = self.binding_missing_modules()
+        if not missing:
             return
-        if binding.startswith("key:"):
+        module_ids = self.modules_for_bindings(missing)
+        if module_ids:
+            names = []
+            for mid in module_ids:
+                meta = self.modules.meta(mid) or {}
+                names.append(meta.get("name") or mid)
+            self._log(f"按键映射引用了未启用的模块: {', '.join(names)}")
+        else:
+            self._log("按键映射包含未知动作")
+        self.events.emit("binding_modules_missing",
+                         {"modules": module_ids, "bindings": missing})
+
+    def _on_ovc_button(self, slot_id: str, bit: int) -> None:
+        binding = self.ovc_bindings().get(str(bit), "none")
+        key, _sep, argument = str(binding).partition(":")
+        if key == "key":
             name = binding[4:].strip()
             if name:
                 ok = keyboard_keys.press(name)
@@ -744,6 +900,17 @@ class Engine:
                 self._log(f"按键 bit{bit} → 键盘 {name} 按下"
                           + ("" if ok else " (注入失败)")
                           + (f" [前台: {target}]" if target else " [无前台窗口]"))
+            return
+        action = self.modules.action(key)
+        if action is not None:
+            self._log(f"按键 bit{bit} → {action.label}"
+                      + (f" {argument}" if argument else ""))
+            try:
+                if action.on_press:
+                    action.on_press(slot_id, argument or None)
+            except Exception:
+                self._log(f"按键动作 {action.key} 按下处理失败:\n"
+                          f"{traceback.format_exc()}")
             return
         if binding not in self._OVC_BUTTON_ACTIONS:
             return
@@ -761,7 +928,7 @@ class Engine:
             elif binding.endswith("_up") or binding.endswith("_down"):
                 delta = +1 if binding.endswith("_up") else -1
                 if "strength" in binding:
-                    await self.add_strength(channel, self._device_step(slot_id) * delta,
+                    await self.add_strength(channel, self.device_step(slot_id) * delta,
                                             slot_id=slot_id)
                 else:
                     await self._step_device_wave(slot_id, channel, delta)
@@ -778,17 +945,24 @@ class Engine:
                            "fire", "estop")
 
     def _on_ovc_button_up(self, slot_id: str, bit: int) -> None:
-        binding = self._ovc_bindings().get(str(bit), "none")
-        if binding.startswith("osc:"):
-            self._send_osc_binding(binding[4:], 0)
-            return
-        if binding.startswith("key:"):
+        binding = self.ovc_bindings().get(str(bit), "none")
+        key, _sep, argument = str(binding).partition(":")
+        if key == "key":
             name = binding[4:].strip()
             if name:
                 keyboard_keys.release(name)
                 target = keyboard_keys.foreground_window()
                 self._log(f"按键 bit{bit} → 键盘 {name} 松开"
                           + (f" [前台: {target}]" if target else ""))
+            return
+        action = self.modules.action(key)
+        if action is not None:
+            try:
+                if action.on_release:
+                    action.on_release(slot_id, argument or None)
+            except Exception:
+                self._log(f"按键动作 {action.key} 松开处理失败:\n"
+                          f"{traceback.format_exc()}")
             return
         if binding == "fire":
             async def _stop() -> None:
@@ -797,18 +971,7 @@ class Engine:
             if self.loop is not None and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(_stop(), self.loop)
 
-    def _send_osc_binding(self, address: str, value: int) -> None:
-        address = address.strip()
-        if not address:
-            return
-        osc = self.osc
-        if osc is None or not getattr(osc, "_running", False):
-            self._log(f"OSC 桥接未运行，无法发送 {address} = {value}")
-            return
-        osc.send_value(address, value)
-        self._log(f"OSC {address} = {value}")
-
-    def _device_step(self, slot_id: str) -> int:
+    def device_step(self, slot_id: str) -> int:
         try:
             step = max(1, min(50, int(self.device_setting(slot_id, "strength_step"))))
         except (TypeError, ValueError):
@@ -841,20 +1004,17 @@ class Engine:
         if isinstance(backend, SocketV4Client):
             backend.select_slot(slot_id)
 
+    @property
+    def osc(self):
+        """当前 OSC 桥接器实例（osc_bridge 模块未加载时为 None）。"""
+        module = self.modules.instance("osc_bridge")
+        return getattr(module, "bridge", None) if module is not None else None
+
     async def osc_start(self) -> None:
-        if self.osc is None:
-            self.osc = OscBridge(
-                OscConfig(self.config["osc"]),
-                self.get_state,
-                self,
-                events=self.events,
-            )
-            self.osc.log = self._log
-        await self.osc.start()
+        await self.modules.start("osc_bridge")
 
     async def osc_stop(self) -> None:
-        if self.osc:
-            await self.osc.stop()
+        await self.modules.stop("osc_bridge")
 
     def set_file_logging(self, enabled: bool) -> None:
         self.config["log_to_file"] = bool(enabled)

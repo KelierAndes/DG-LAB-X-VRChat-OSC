@@ -12,7 +12,7 @@ from win32more.winui3 import XamlApplication
 
 from ui.shell import App
 
-CRASH_LOG = os.path.join(tempfile.gettempdir(), "dglab_osc_crash.log")
+CRASH_LOG = os.path.join(tempfile.gettempdir(), "dgstudio_crash.log")
 REPORT = {}
 
 
@@ -60,7 +60,8 @@ def _run_selftest() -> None:
                     pressure=18.4, edge_state=1, battery=41)
                 win.state = fake
 
-                for tag in ("dashboard", "connect", "control", "link", "log", "settings"):
+                for tag in ("dashboard", "connect", "control", "link", "modules",
+                            "log", "settings"):
                     win.goto(tag)
                     page = win._page(tag)
                     REPORT[f"page_{tag}"] = page is not None
@@ -92,6 +93,19 @@ def _run_selftest() -> None:
                 REPORT["binding_pick_ok"] = (bind_label is not None
                                              and bind_label.Text == control._binding_label_text("fire"))
                 page._updating = True
+
+                from ui import live as ui_live
+                action_keys = [k for k, _ in ui_live.button_actions(win.engine)]
+                REPORT["module_action_ok"] = ("osc" in action_keys
+                                              and "key" in action_keys)
+                REPORT["osc_action_dispatch_ok"] = (win.engine.modules.action("osc")
+                                                    is not None)
+                REPORT["builtin_binding_ok"] = (win.engine.binding_missing_modules(
+                    {"13": "fire", "12": "key:F1"}) == {})
+                err = win.engine.rename_ovc_profile("默认", "自检配置")
+                REPORT["rename_ok"] = (err is None
+                                       and "自检配置" in win.engine.config["ble"]["ovc_profiles"]
+                                       and win.engine.config["ble"]["ovc_profile"] == "自检配置")
 
                 from win32more.Microsoft.UI.Xaml import Visibility
                 glow = ovc.button_glows.get(13)
@@ -134,7 +148,7 @@ def main() -> int:
         def _probe_engine():
             from app import Engine
 
-            path = os.path.join(tempfile.gettempdir(), "dglab_osc_selftest_cfg.json")
+            path = os.path.join(tempfile.gettempdir(), "dgstudio_selftest_cfg.json")
             if os.path.exists(path):
                 try:
                     os.remove(path)
@@ -161,7 +175,7 @@ def main() -> int:
                 pass
     if selftest:
         try:
-            path = os.path.join(tempfile.gettempdir(), "dglab_osc_selftest.json")
+            path = os.path.join(tempfile.gettempdir(), "dgstudio_selftest.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(REPORT, f, ensure_ascii=False, default=str, indent=2)
             if REPORT.get("launched", True) and "error" not in REPORT:

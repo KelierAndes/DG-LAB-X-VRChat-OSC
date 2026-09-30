@@ -1,0 +1,74 @@
+✔ 1.分离OSC模块作为外部插件引入，增强扩展性（modules/osc_bridge + plugins.py 宿主）
+✔ 2.将各种强度参数通过公开方法向模块暴露，便于后续扩展（Engine.intensity_params / set_intensity_param，文档 EXTENSIONS.md）
+✔ 3.主页小卡片相应修改（已连接设备，输出设备，已启用输入链路计数，已启用输出链路计数）
+✔ 4.主页中卡片相应修改（输入通道，输出通道（包含通道探活），输入数据值，输出数据值）
+✔ 5.联动页输入映射表，输出映射表风格保持一致（统一四列表格），隐藏未使用参数（Battery/ChannelOK 按上报显示，按设备家族过滤）
+✔ 6.新增模块页用于实时安装或卸载联动模块（导航「模块」，支持扫描目录热加载）
+✔ 7.OSC相关设置项放回联动页的OSC联动卡片中（地址/端口/前缀，设置页已移除 OSC 组）
+✔ 8.应用名更换为DGStudio（窗口标题、关于页、dgstudio.log、DGStudio.spec、build_exe、README）
+
+第二轮：
+✔ 9.负鼠按键「发送 OSC 参数」选项由 OSC 模块动态注册（ButtonAction 扩展点），卸载模块即从绑定选择框撤下
+✔ 10.配置校验：启动与切换映射配置文件时，引用未启用模块动作 → 弹窗「启用并加载 / 拒绝加载」（拒绝则相关绑定重置为无动作并保存）
+✔ 11.按键映射配置文件改名（控制页「✎改名」按钮 + Engine.rename_ovc_profile，重名/空名校验、保序）
+
+第三轮（热重载修复）：
+✔ 12.模块装卸即时刷新全部页面（shell._notify_all）——卸载 OSC 后绑定选择框立即撤下「发送 OSC 参数」
+✔ 13.卸载模块后立即重跑映射校验（Engine 订阅 modules_changed）
+
+第四轮（模块配置拆分）：
+✔ 14.模块设置独立成文件：config/<模块>.json（OSC→config/osc.json，alice→config/alice_cradle.json），
+    启用状态在 config/modules.json；JsonDict 写穿即时落盘
+✔ 15.旧主配置自动迁移（顶层 osc/modules 段 → 拆分文件并从主配置移除，幂等；旧 osc.enabled 移入 modules.json）
+✔ 16.启用语义归一：META default_enabled（osc 默认自启动），OSC 桥接内建 enabled 门槛删除，联动页开关改走 install/uninstall
+✔ 17.build_exe.py 备份/恢复 config/ 目录；.gitignore/.zcodeignore 增 config/
+
+验证：unittest 138 项全过（1 skip：8920 被运行中的实例占用，测试已加 skipTest 保护）；
+源码/打包 selftest 通过；真实配置迁移冒烟 + 打包态真启动迁移验证均通过。
+打包：dist/DGStudio 已重建。注意：dist/DGStudio/config.json 与 dgstudio.log、config/ 为运行时文件（已 gitignore）。
+
+第五轮（映射表重构 + AIC 模组纯数据化 + 联动页对齐）：
+✔ 18.模块可写/可读参数模型：link_params() 明确为可写参数（META["params"]），新增
+    read_params() 可读参数（META["reads"] 按「核心输出信号 → 默认字段名」声明）；
+    AIC 装载时空输出表按 reads + 配置家族自动落地默认可读字段行
+✔ 19.表达式下拉输入：输入/输出表表达式格 = 输入框 + 「参数」「运算」MenuFlyout，
+    点选即把 {已有参数} 与 （ + - * / ） 追加到表达式尾部，插入即落盘
+✔ 20.OSC 直接定义变量：OSC 卡片顶部「生成映射表」区，输入头像参数名（逗号/空格分隔）
+    即生成映射行（modules/osc_bridge/quickmap.py：默认命名全名 → 信号后缀 →
+    自由输出字段；默认命名命中时双向各一行）
+✔ 21.联动页模板对齐：表头行 auto 列以透明删除按钮占位（修复「实时值」表头右移），
+    数据行控件全部垂直居中，下拉/名称框/滑块/NumberBox/文本框拉伸填满列宽
+✔ 22.AIC Unity 模组 v0.2.0 重写为纯数据发送端：删除 Game Hub 协议与强度换算，
+    DataClient（POST /data 上报 + GET /data 轮询回传字段）+ VitalSampler（HP/MP/EP
+    采样与 Hurt/Heal/MpLost/MpGain/Orgasming 差分信号），F9 面板显示回传字段网格
+
+验证：unittest 171 项全过（新增 test_osc_quickmap 7 项 + AIC reads 落地 4 项）；
+main.py --selftest EXIT=0；dotnet build -t:Deploy 0 警告并已部署；
+实机截图确认联动页表头对齐与快速生成链路，测试写入的映射行已从 config 还原。
+
+第六轮（OSC 双向自定义参数名 + 设置区老样式 + 打包）：
+✔ 23.移除「直接定义变量」批量生成（quickmap.py 及测试删除），改为逐行交互：
+    OSC 输入表新增「参数名（可自定义）」列，双向映射行均为 {param, name, expr}；
+    添加行 / 选择核心参数即自动生成默认参数名（bridge.default_input_name /
+    default_output_name 按设备前缀模板）与默认直传表达式；输出行同时刷新 type；
+    手动改名时直传形式表达式同步跟随；materialize_names 为存量输入行补默认名
+✔ 24.模块设置区回归老版样式：field_row 全宽行（标签+说明居左、控件右对齐），
+    OSC 卡标题「OSC 地址与端口（修改后重新开关上方桥接生效）」
+✔ 25.build_exe.py 重建 dist/DGStudio（打包 selftest EXIT=0）
+
+验证：unittest 168 项全过；selftest EXIT=0；实机截图核对老样式与参数名列；
+用户运行期写入的配置（AIC 表达式等）在打包备份/恢复后完整保留。
+
+第七轮（映射重置修复 + Bool 归一 + AIC 去家族化）：
+✔ 26.修复添加/删除映射行导致其他行被重置：rebuild 拆除 ComboBox 时可能以 -1 触发
+    SelectionChanged，负索引静默选中末项（急停）并重生成默认表达式；三处下拉处理器
+    补 0<=idx<len 守卫（输入/输出/choice）
+✔ 27.Bool 类型核心参数标明类型（下拉后缀 Int/Bool/Float），求值改「非零即真」归一
+    0/1（旧 round 银行家舍入使 0.4/0.5 全变 0，开火等不生效）
+✔ 28.fire/zap/急停派发器加 0↔非零边沿记忆：引擎重载/复位后的重复派发不再重复触发
+    或误停开火保持
+✔ 29.AIC 移除「核心输出取值家族」配置：短名别名按全家族解析（COYOTEmax 等 + 裸短名
+    跨家族兜底），materialize_reads 按信号跨家族落地，存量 family 键装载时清理
+
+验证：unittest 172 项全过；selftest EXIT=0；build_exe 重建 dist 且打包 selftest 通过；
+用户运行期写入的配置（自定义表达式、新增映射行）完整保留。
