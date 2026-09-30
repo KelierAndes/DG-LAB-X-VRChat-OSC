@@ -294,6 +294,14 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
         led_frames = [d for _c, d in ovc_client.written if d[0] == 0x50]
         self.assertEqual(led_frames[-1], bytes([0x50, LED_COLORS["magenta"], 0x01]))
 
+        await self.ble.connect("addr-c", "coyote_v3")
+        await self.ble.set_led("blue", slot_id="addr-c")
+        coyote_client = FakeBleakClient.instances["addr-c"]
+        coyote_led = [d for _c, d in coyote_client.written
+                      if d[0] == 0x50 and len(d) == 17]
+        self.assertEqual(coyote_led[-1],
+                         bytes([0x50, LED_COLORS["blue"], 0x00]) + bytes(14))
+
         await self.ble.connect("addr-bmtr", "bmtr")
         await self.ble.bmtr_flip(slot_id="addr-bmtr")
         bmtr_client = FakeBleakClient.instances["addr-bmtr"]
@@ -314,6 +322,11 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
         data[2:4] = (1 << 13).to_bytes(2, "big")
         self.ble._on_notify(session, None, data)
         self.assertEqual(events, [("addr-ovc", 13)])
+        release: list[tuple[str, int]] = []
+        self.ble.events.on("ovc_button_up", lambda sid, bit: release.append((sid, bit)))
+        data[2:4] = (0).to_bytes(2, "big")
+        self.ble._on_notify(session, None, data)
+        self.assertEqual(release, [("addr-ovc", 13)])
 
     async def test_bmtr_d0_stats_and_pressure(self):
         await self.ble.connect("addr-bmtr", "bmtr")
@@ -332,24 +345,96 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_binding_dispatches_fire(self):
+    def _engine(self):
         import app as app_module
 
         engine = app_module.Engine()
         engine.start()
+        return engine
+
+    def _set_profile(self, engine, mapping: dict) -> None:
+        ble = engine.config.setdefault("ble", {})
+        ble["ovc_profiles"] = {"默认": dict(mapping)}
+        ble["ovc_profile"] = "默认"
+
+    async def test_binding_dispatches_fire_hold(self):
+        engine = self._engine()
         try:
-            fired: list[str | None] = []
+            started: list[str | None] = []
+            stopped: list[str | None] = []
 
-            async def fake_fire(slot_id=None, duration_s=None):
-                fired.append(slot_id)
+            async def fake_start(slot_id=None):
+                started.append(slot_id)
 
-            engine.fire = fake_fire
-            engine.config.setdefault("ble", {})["ovc_buttons"] = {"13": "fire"}
+            async def fake_stop(slot_id=None):
+                stopped.append(slot_id)
+
+            engine.fire_start = fake_start
+            engine.fire_stop = fake_stop
+            self._set_profile(engine, {"13": "fire"})
             engine._on_ovc_button("addr-ovc", 13)
             await asyncio.sleep(0.3)
-            self.assertEqual(fired, ["addr-ovc"])
+            self.assertEqual(started, ["addr-ovc"])
+            engine._on_ovc_button_up("addr-ovc", 13)
+            await asyncio.sleep(0.3)
+            self.assertEqual(stopped, ["addr-ovc"])
         finally:
             engine.stop()
+
+    async def test_binding_dispatches_keyboard(self):
+        import app as app_module
+
+        engine = self._engine()
+        try:
+            pressed: list[str] = []
+            released: list[str] = []
+            original_press = app_module.keyboard_keys.press
+            original_release = app_module.keyboard_keys.release
+            app_module.keyboard_keys.press = lambda name: pressed.append(name)
+            app_module.keyboard_keys.release = lambda name: released.append(name)
+            try:
+                self._set_profile(engine, {"13": "key:F1"})
+                engine._on_ovc_button("addr-ovc", 13)
+                engine._on_ovc_button_up("addr-ovc", 13)
+                await asyncio.sleep(0.2)
+                self.assertEqual(pressed, ["F1"])
+                self.assertEqual(released, ["F1"])
+            finally:
+                app_module.keyboard_keys.press = original_press
+                app_module.keyboard_keys.release = original_release
+        finally:
+            engine.stop()
+
+    async def test_profile_migration_and_switch(self):
+        engine = self._engine()
+        try:
+            ble = engine.config["ble"]
+            self.assertIn("默认", ble["ovc_profiles"])
+            self.assertEqual(ble["ovc_profile"], "默认")
+            legacy = ble["ovc_profiles"]["默认"]
+            self.assertEqual(engine._ovc_bindings().get("13"), legacy.get("13"))
+            ble["ovc_profiles"]["配置2"] = {"13": "estop"}
+            ble["ovc_profile"] = "配置2"
+            self.assertEqual(engine._ovc_bindings()["13"], "estop")
+            ble["ovc_profile"] = "不存在的配置"
+            self.assertEqual(engine._ovc_bindings().get("13"),
+                             ble["ovc_profiles"]["默认"].get("13"))
+        finally:
+            engine.stop()
+
+
+class KeyboardKeysTests(unittest.TestCase):
+    def test_vk_roundtrip(self):
+        from dglab import keys
+
+        for name in ("F1", "A", "0", "Space", "Left", "Num5", "Shift", "Quote"):
+            vk = keys.vk_from_name(name)
+            self.assertIsNotNone(vk, name)
+            self.assertEqual(keys.key_name(vk), name)
+        self.assertEqual(keys.vk_from_name("VK7B"), 0x7B)
+        self.assertEqual(keys.key_name(0x7B), "F12")
+        self.assertIsNone(keys.vk_from_name(""))
+        self.assertIsNone(keys.vk_from_name("不是按键"))
 
 
 class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -728,14 +813,16 @@ class LogBufferMirrorTests(unittest.TestCase):
         self.assertEqual(buffer.snapshot()[-1][2], "engine-msg")
 
 
-class OvcBindingActionTableTests(unittest.TestCase):
+class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
     def test_button_actions_match_engine(self):
         import app as app_module
 
         from ui import live
 
-        self.assertEqual(tuple(k for k, _ in live.BUTTON_ACTIONS),
+        self.assertEqual(tuple(k for k, _ in live.BUTTON_ACTIONS[:-2]),
                          app_module.Engine._OVC_BUTTON_ACTIONS)
+        self.assertEqual([k for k, _ in live.BUTTON_ACTIONS[-2:]],
+                         ["osc", "key"])
 
 
     async def test_binding_strength_single_channel(self):
@@ -750,13 +837,41 @@ class OvcBindingActionTableTests(unittest.TestCase):
                 calls.append((channel, delta, slot_id))
 
             engine.add_strength = fake_add
-            bindings = engine.config.setdefault("ble", {}).setdefault("ovc_buttons", {})
+            bindings = (engine.config.setdefault("ble", {})
+                        .setdefault("ovc_profiles", {}).setdefault("默认", {}))
+            engine.config["ble"]["ovc_profile"] = "默认"
             bindings["13"] = "a_strength_up"
             engine._on_ovc_button("addr-ovc", 13)
             bindings["13"] = "b_strength_down"
             engine._on_ovc_button("addr-ovc", 13)
             await asyncio.sleep(0.3)
             self.assertEqual(calls, [("A", 1, "addr-ovc"), ("B", -1, "addr-ovc")])
+        finally:
+            engine.stop()
+
+    async def test_binding_osc_pass_through(self):
+        import app as app_module
+
+        engine = app_module.Engine()
+        engine.start()
+        try:
+            sent: list[tuple[str, int]] = []
+
+            class FakeOsc:
+                _running = True
+
+                def send_value(self, address, value):
+                    sent.append((address, value))
+
+            engine.osc = FakeOsc()
+            bindings = (engine.config.setdefault("ble", {})
+                        .setdefault("ovc_profiles", {}).setdefault("默认", {}))
+            engine.config["ble"]["ovc_profile"] = "默认"
+            bindings["13"] = "osc:/avatar/parameters/Trigger"
+            engine._on_ovc_button("addr-ovc", 13)
+            engine._on_ovc_button_up("addr-ovc", 13)
+            self.assertEqual(sent, [("/avatar/parameters/Trigger", 1),
+                                    ("/avatar/parameters/Trigger", 0)])
         finally:
             engine.stop()
 
@@ -772,13 +887,23 @@ class OvcBindingActionTableTests(unittest.TestCase):
                 waves.append((channel, name))
 
             engine.set_wave = fake_set_wave
-            bindings = engine.config.setdefault("ble", {}).setdefault("ovc_buttons", {})
+            import types
+            from dglab.state import EngineState, Slot
+            state = EngineState()
+            state.slots["addr-ovc"] = Slot(slot_id="addr-ovc", name="负鼠",
+                                           type="OVC_1")
+            engine._backend = types.SimpleNamespace(state=state)
+            bindings = (engine.config.setdefault("ble", {})
+                        .setdefault("ovc_profiles", {}).setdefault("默认", {}))
+            engine.config["ble"]["ovc_profile"] = "默认"
             bindings["13"] = "a_wave_up"
             engine._on_ovc_button("addr-ovc", 13)
             bindings["13"] = "b_wave_down"
             engine._on_ovc_button("addr-ovc", 13)
             await asyncio.sleep(0.3)
-            self.assertEqual(waves, [("A", CONTINUOUS), ("B", SILENT)])
+            from vrc.osc_bridge import wave_order
+            self.assertEqual(waves, [("A", CONTINUOUS),
+                                     ("B", wave_order("OVC")[-1])])
         finally:
             engine.stop()
 

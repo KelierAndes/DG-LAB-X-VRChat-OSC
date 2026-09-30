@@ -109,6 +109,10 @@ def build_ovc_50(enable_buttons: bool = True, color: int = 1) -> bytes:
     return bytes([0x50, color & 0xFF, 0x01 if enable_buttons else 0x00])
 
 
+def build_coyote_50(color: int = 1) -> bytes:
+    return bytes([0x50, color & 0xFF, 0x00]) + bytes(14)
+
+
 def build_bmtr_50(enable_pressure: bool = True, color: int = 1) -> bytes:
     return bytes([0x50, color & 0xFF, 0xD0 if enable_pressure else 0x00]) + bytes(14)
 
@@ -454,6 +458,9 @@ class BleClient:
             self._log(f"{session.slot_id} 按键按下: bit{bit}")
             self.events.emit("action", bit)
             self.events.emit("ovc_button", session.slot_id, bit)
+        for bit in sorted(session._pressed - pressed):
+            self._log(f"{session.slot_id} 按键抬起: bit{bit}")
+            self.events.emit("ovc_button_up", session.slot_id, bit)
         session._pressed = pressed
 
     async def _send_bf(self, session: BleSession) -> None:
@@ -632,18 +639,20 @@ class BleClient:
         session.fire_task = asyncio.create_task(_restore())
         self._log(f"{session.slot_id} 一键开火 {duration_s}s 强度 {cap}")
 
-    async def set_led(self, color: str, slot_id: str | None = None) -> None:
+    async def set_led(self, color: str | int, slot_id: str | None = None) -> None:
         session = self._session(slot_id)
-        if session.kind not in ("ovc", "bmtr"):
-            raise RuntimeError("该设备不支持 LED 颜色设置 (仅负鼠/灵猫)")
-        byte = LED_COLORS.get(color)
+        if session.kind not in ("ovc", "bmtr", "coyote_v3"):
+            raise RuntimeError("该设备不支持 LED 颜色设置 (仅郊狼/负鼠/灵猫)")
+        byte = color if isinstance(color, int) else LED_COLORS.get(color)
         if byte is None:
             raise RuntimeError(f"未知颜色: {color}")
         session.led_color = byte
         if session.kind == "ovc":
             await self._write(session, build_ovc_50(enable_buttons=True, color=byte))
-        else:
+        elif session.kind == "bmtr":
             await self._write(session, build_bmtr_50(enable_pressure=True, color=byte))
+        else:
+            await self._write(session, build_coyote_50(color=byte))
         self._log(f"{session.slot_id} LED 颜色 → {color}")
 
     async def bmtr_flip(self, slot_id: str | None = None) -> None:

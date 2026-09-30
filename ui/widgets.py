@@ -37,7 +37,14 @@ from win32more.Microsoft.UI.Xaml.Controls import (
     TextBlock,
     ToggleSwitch,
 )
-from win32more.Microsoft.UI.Xaml.Media import FontFamily, PointCollection, Stretch
+from win32more.Microsoft.UI.Xaml.Media import (
+    Brush,
+    FontFamily,
+    PointCollection,
+    SolidColorBrush,
+    Stretch,
+)
+from win32more.Windows.UI import Color
 from win32more.Microsoft.UI.Xaml.Shapes import Polyline
 from win32more.Windows.Foundation import Point
 
@@ -277,9 +284,31 @@ def text_button(
         b.Background = theme.brush("accent")
         b.BorderBrush = theme.brush("accent")
         b.Foreground = theme.brush("on_accent")
+        solid_button_states(b, theme.color("accent"), theme.brush("on_accent"))
     if on_click is not None:
         b.Click += on_click
     return b
+
+
+def solid_button_states(b, base_color: Color, foreground) -> None:
+    over = theme.shade(base_color, 0.90)
+    pressed = theme.shade(base_color, 0.80)
+    for key, value in (
+        ("ButtonBackgroundPointerOver", SolidColorBrush(over)),
+        ("ButtonBackgroundPressed", SolidColorBrush(pressed)),
+        ("ButtonBorderBrushPointerOver", SolidColorBrush(over)),
+        ("ButtonBorderBrushPressed", SolidColorBrush(pressed)),
+        ("ButtonForegroundPointerOver", foreground),
+        ("ButtonForegroundPressed", foreground),
+    ):
+        try:
+            b.Resources.Insert(key, value)
+        except Exception:
+            try:
+                b.Resources[key] = value
+            except Exception:
+                pass
+
 
 def estop_button(label: str, *, symbol: str = "Stop", on_click=None):
     white = theme.estop_foreground()
@@ -296,6 +325,7 @@ def estop_button(label: str, *, symbol: str = "Stop", on_click=None):
     b.Background = theme.estop_fill()
     b.BorderBrush = theme.estop_fill()
     b.Foreground = white
+    solid_button_states(b, theme.ESTOP_RED, white)
     if on_click is not None:
         b.Click += on_click
     return b

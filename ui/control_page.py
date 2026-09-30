@@ -1,15 +1,32 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 
-from win32more.Microsoft.UI.Xaml import Thickness
-from win32more.Microsoft.UI.Xaml.Controls import Page
+from win32more.Microsoft.UI.Xaml import TextAlignment, Thickness, Visibility
+from win32more.Microsoft.UI.Xaml.Controls import (
+    Canvas,
+    ComboBoxItem,
+    MenuFlyout,
+    MenuFlyoutItem,
+    Page,
+    ToolTip,
+    ToolTipService,
+)
+from win32more.Microsoft.UI.Xaml.Media import (
+    PenLineJoin,
+    PointCollection,
+    SolidColorBrush,
+)
+from win32more.Microsoft.UI.Xaml.Shapes import Ellipse, Polyline
+from win32more.Windows.Foundation import Point
+from win32more.Windows.UI import Color
 from win32more.winui3 import XamlClass
 
-from dglab.ble import LED_COLORS
 from dglab.state import family_of
+from dglab import keys as keyboard_keys
 from ui import charts
 from ui import live, theme, widgets as W
 from ui.paths import xaml
@@ -34,6 +51,11 @@ class CardView:
         self.direct_a = None
         self.direct_b = None
         self.bindings: dict[int, object] = {}
+        self.binding_inputs: dict[int, object] = {}
+        self.binding_keys: dict[int, object] = {}
+        self.binding_canvas = None
+        self.profile_combo = None
+        self.button_glows: dict[int, object] = {}
 
 class _Series:
     """line_chart 的一条曲线（鸭子类型，匹配原型 PressureSeries）。"""
@@ -57,6 +79,7 @@ class ControlPage(XamlClass, Page):
         self._last_chart_render = 0.0
         self._last_pressure_render = 0.0
         self._last_value_render = 0.0
+        self._glow_state: dict[int, tuple] = {}
         self.LoadComponentFromFile(xaml("ControlPage.xaml"), encoding="utf-8")
         self.rebuild()
 
@@ -68,6 +91,7 @@ class ControlPage(XamlClass, Page):
             return
         now = time.monotonic()
         self._sample_pressure(now)
+        self._refresh_glows()
         if now - self._last_value_render >= 0.2:
             self._last_value_render = now
             self._update_values(state)
@@ -97,6 +121,7 @@ class ControlPage(XamlClass, Page):
         host = self.CardsHost
         host.Children.Clear()
         self._cards.clear()
+        self._glow_state.clear()
         if not state.slots:
             host.Children.Append(self._empty_note())
             return
@@ -211,8 +236,10 @@ class ControlPage(XamlClass, Page):
         view.hold_label = hold_label
         actions.Children.Append(hold_border)
 
-        if family == "OVC" and self.shell.state.backend == "ble":
+        if self.shell.state.backend == "ble":
             actions.Children.Append(self._led_combo(view, sid))
+            if family == "OVC":
+                actions.Children.Append(self._profile_selector(view))
 
         inner = W.stack(spacing=12, h="stretch")
         inner.Children.Append(head)
@@ -223,8 +250,7 @@ class ControlPage(XamlClass, Page):
         inner.Children.Append(actions)
 
         if family == "OVC" and self.shell.state.backend == "ble":
-            for block in self._binding_blocks(view):
-                inner.Children.Append(block)
+            inner.Children.Append(self._binding_blocks(view))
 
         inner.Children.Append(W.text(
             "强度用加减键调节（步长见本卡参数）；波形可下拉跳变或 ‹ / › 逐步切换；"
@@ -373,16 +399,25 @@ class ControlPage(XamlClass, Page):
         return handler
 
     def _led_combo(self, view: CardView, sid: str) -> object:
-        names = list(LED_COLORS)
-        combo = W.combo(names, selected=1, width=140)
+        combo = W.combo((), width=150)
+        for _byte, label, hexs in live.LED_OPTIONS:
+            item = ComboBoxItem()
+            row = W.stack(horizontal=True, spacing=8, v="center")
+            row.Children.Append(W.box(width=10, height=10, corner=5,
+                                      background=theme.solid(hexs)))
+            row.Children.Append(W.text(label, size=13))
+            item.Content = row
+            combo.Items.Append(item)
+        combo.SelectedIndex = 1
         view.led_combo = combo
 
         def _changed(sender, args):
             if self._updating:
                 return
             index = combo.SelectedIndex
-            if 0 <= index < len(names):
-                self.shell.submit(self.shell.engine.set_led_color(names[index],
+            if 0 <= index < len(live.LED_OPTIONS):
+                byte = live.LED_OPTIONS[index][0]
+                self.shell.submit(self.shell.engine.set_led_color(byte,
                                                                   slot_id=sid))
 
         combo.SelectionChanged += _changed
@@ -391,56 +426,575 @@ class ControlPage(XamlClass, Page):
         cell.Children.Append(combo)
         return cell
 
-    def _binding_blocks(self, view: CardView) -> list:
-        bindings = (self.shell.engine.config.setdefault("ble", {})
-                    .setdefault("ovc_buttons", {}))
-        blocks: list = []
-        groups = (("选择 / 主页键", live.OVC_BUTTON_BITS[0:3]),
-                  ("方向键", live.OVC_BUTTON_BITS[3:7]),
-                  ("动作键", live.OVC_BUTTON_BITS[7:11]))
-        for title, bits in groups:
-            rows = W.stack(spacing=10, h="stretch")
-            for start in range(0, len(bits), 3):
-                g = W.grid(W.star(1), W.star(1), W.star(1))
-                g.ColumnSpacing = 16
-                for i, (bit, name) in enumerate(bits[start:start + 3]):
-                    g.Children.Append(W.put(
-                        self._binding_dropdown(view, bit, name, bindings), i))
-                rows.Children.Append(g)
+    # ---- 负鼠按键映射配置文件 ----
 
-            inner = W.stack(spacing=8, h="stretch")
-            head = W.stack(horizontal=True, spacing=8, v="center")
-            head.Children.Append(W.text(f"物理按键绑定 · {title}", size=11,
-                                        bold=W.SEMIBOLD, color="text3"))
-            head.Children.Append(W.text("蓝牙模式下生效", size=11, color="text3", v="center"))
-            inner.Children.Append(head)
-            inner.Children.Append(rows)
-            blocks.append(W.panel(inner))
-        return blocks
+    def _active_bindings(self) -> dict:
+        """当前激活配置文件的按键映射 (bit → 动作)."""
+        ble = self.shell.engine.config.setdefault("ble", {})
+        profiles = ble.setdefault("ovc_profiles", {})
+        active = ble.setdefault("ovc_profile", "默认")
+        return profiles.setdefault(active, {})
 
-    def _binding_dropdown(self, view: CardView, bit: int, name: str, bindings) -> object:
-        current = bindings.get(str(bit), "none")
-        selected = 0
-        for i, (key, _label) in enumerate(live.BUTTON_ACTIONS):
-            if key == current:
-                selected = i
-                break
-        combo = W.combo([label for _k, label in live.BUTTON_ACTIONS],
-                        selected=selected, width=140)
-        view.bindings[bit] = combo
+    def _profile_selector(self, view: CardView) -> object:
+        engine = self.shell.engine
+        ble = engine.config.setdefault("ble", {})
+        profiles = ble.setdefault("ovc_profiles", {})
+        names = list(profiles) or ["默认"]
+        active = ble.get("ovc_profile") if ble.get("ovc_profile") in names else names[0]
+        combo = W.combo(names, selected=names.index(active), width=140)
+        view.profile_combo = combo
+
+        def _switch(sender, args):
+            if self._updating:
+                return
+            index = combo.SelectedIndex
+            if not (0 <= index < len(names)):
+                return
+            if ble.get("ovc_profile") == names[index]:
+                return
+            ble["ovc_profile"] = names[index]
+            engine.save_config()
+            self.rebuild()
+
+        combo.SelectionChanged += _switch
+
+        def _new(sender, args):
+            template = dict(self._active_bindings())
+            index = 1
+            while f"配置{index}" in profiles:
+                index += 1
+            name = f"配置{index}"
+            profiles[name] = template
+            ble["ovc_profile"] = name
+            engine.save_config()
+            self.rebuild()
+
+        new_btn = W.button("＋新建", width=64, height=32, v="center", on_click=_new)
+        self._bv_tip(new_btn, "以当前配置文件的映射为模板新建一份，并切换过去")
+        row = W.stack(horizontal=True, spacing=6, v="center")
+        row.Children.Append(combo)
+        row.Children.Append(new_btn)
+        cell = W.stack(spacing=4)
+        cell.Children.Append(W.text("按键映射配置文件 (负鼠)", size=11, color="text3"))
+        cell.Children.Append(row)
+        return cell
+
+    # ---- 负鼠绑定块：官方离线模式页 1:1 复刻 ----
+    # 坐标一律取官方截图像素系（647×291），经 _BV_SCALE 缩放平移后画到画布上。
+    # 机身对称轴 x=316：十字键簇中心 246 与菱形键簇中心 386 互为镜像。
+    # _BV_OX 取 -30：给左侧 OSC 输入框留出画布空间（输入框与选择按钮错开摆放）。
+    _BV_SCALE = 1.5
+    _BV_OX, _BV_OY = -30, 78
+
+    _BV_BG = "#0B0B0B"
+    _BV_EDGE = ("#8E8E8E", "#585858", "#414141")   # 机身三层描边（外→内）
+    _BV_ART = "#8F8F8F"                            # 屏幕/键外层描边
+    _BV_ART2 = "#6F6F6F"                           # 键内层描边（双层样式）
+    _BV_GLYPH = "#C6C6C6"                          # 键面符号/字母
+    _BV_LEAD = "#C9C9C9"                           # 指示线
+    _BV_DOT = "#F2F2F2"                            # 指示线端点（按键内偏侧）
+    _BV_TEXT = "#D9CFA6"                           # 标注文字（米黄）
+
+    _BV_BODY = (188, 92, 444, 227, 16)              # x0 y0 x1 y1 切角
+    _BV_SCREEN = (284, 112, 348, 143)
+    # 十字键：中心 (246,165)，半长 38 使整体 76×76 与右侧键组（76×74）一致，
+    # 臂厚 20 与中心圆直径一致；外围折角圆角化。
+    _BV_CXKEY = (246, 165, 38, 10)                  # cx cy 半长 半宽
+    _BV_DIRS = {8: ((246, 132), (241, 140), (251, 140)),
+                9: ((246, 198), (241, 190), (251, 190)),
+                10: ((216, 165), (224, 160), (224, 170)),
+                11: ((276, 165), (268, 160), (268, 170))}
+    _BV_FACES = {14: (386, 141, "G"), 15: (361, 165, "D"),
+                 12: (411, 165, "B"), 13: (386, 189, "A")}
+    # 底部 SEL_1 / HOME / SEL_2：双层线稿，中心线 y=202 对齐键组最下缘
+    _BV_SMALLS = {0: (((282, 202), (296, 194), (296, 210)),
+                      ((285.5, 202), (294, 196.8), (294, 207.2))),
+                  2: (((309, 194), (323, 194), (323, 210), (309, 210)),
+                      ((311.3, 196.3), (320.7, 196.3), (320.7, 207.7),
+                       (311.3, 207.7))),
+                  1: (((350, 202), (336, 194), (336, 210)),
+                      ((346.5, 202), (338, 196.8), (338, 207.2)))}
+    # 指示线：终点圆点落在键面内、避开字符/箭头（左簇左移 8，右簇右移 8，
+    # 关于轴 316 镜像对称）。右簇行 2=D、行 3=B：D 线从 G 键下方穿过 G/B 环
+    # 间隙落到 D 面右上，B 线自行 3 斜上落到 B 面右侧。
+    _BV_LINKS = {
+        8: [(163, 104), (205, 104), (238, 137)],
+        10: [(163, 141), (189, 141), (213, 165)],
+        11: [(163, 178), (250, 178), (263, 165)],
+        9: [(163, 215), (216, 215), (238, 193)],
+        14: [(469, 104), (431, 104), (394, 141)],
+        15: [(469, 141), (414, 141), (397, 158), (368, 158)],
+        12: [(469, 178), (432, 178), (419, 165)],
+        13: [(469, 215), (420, 215), (394, 189)],
+        0: [(238, 240), (275, 240), (291, 224), (291, 202)],
+        2: [(316, 248), (316, 202)],
+        1: [(394, 240), (357, 240), (341, 224), (341, 202)],
+    }
+    # 四行标注 y=104/141/178/215，整体中心 159.5 = 机身高度中心（垂直居中）
+    # bit -> (文字锚点x, y, 宽(画布px), 对齐)；锚点=文字靠近引导线一侧的边缘
+    _BV_LABELS = {
+        8: (158, 104, 130, "right"), 10: (158, 141, 130, "right"),
+        11: (158, 178, 130, "right"), 9: (158, 215, 130, "right"),
+        14: (474, 104, 130, "left"), 15: (474, 141, 130, "left"),
+        12: (474, 178, 130, "left"), 13: (474, 215, 130, "left"),
+        0: (234, 240, 130, "right"), 1: (398, 240, 130, "left"),
+        2: (316, 262, 130, "center"),
+    }
+    _BV_BTN_H = 30                                  # 标注按钮高度（画布px）
+    _BV_BOX_W = 130                                 # OSC 输入框宽（画布px）
+    # 按下实时反馈的高亮覆盖层：bit -> (中心x, 中心y, 半径)（官方像素系）。
+    # 十字键落在臂端箭头上，小键落在键面中心，菱形键覆盖整个双环。
+    _BV_GLOW = {8: (246, 138, 9), 9: (246, 192, 9),
+                10: (220, 165, 9), 11: (272, 165, 9),
+                0: (291, 202, 9), 2: (316, 202, 9), 1: (341, 202, 9),
+                14: (386, 141, 12.5), 15: (361, 165, 12.5),
+                12: (411, 165, 12.5), 13: (386, 189, 12.5)}
+    _BV_GLOW_FILL = Color(110, 90, 190, 255)        # 半透明亮蓝填充
+    _BV_GLOW_STROKE = Color(235, 140, 210, 255)     # 近不透明描边
+    _BV_GLOW_MIN = 0.25                             # 快按最短点亮时长（秒）
+    _BV_GLOW_MAX = 8.0                              # 丢抬起沿时的兜底熄灭（秒）
+    # 画布固定在深色底上，块内原生控件不随系统主题变化：
+    # 用控件级 Resources 覆写 Button/TextBox 模板的主题资源键，
+    # 亮色模式下仍是深色芯片观感，米黄文字保持可读。
+    _BV_BTN_DARK = {
+        "ButtonBackground": "#141414",
+        "ButtonBackgroundPointerOver": "#1F1F1F",
+        "ButtonBackgroundPressed": "#0D0D0D",
+        "ButtonBackgroundDisabled": "#0D0D0D",
+        "ButtonBorderBrush": "#585858",
+        "ButtonBorderBrushPointerOver": "#7A7A7A",
+        "ButtonBorderBrushPressed": "#414141",
+        "ButtonBorderBrushDisabled": "#3A3A3A",
+        "ButtonForeground": "#D9CFA6",
+        "ButtonForegroundPointerOver": "#EADFBC",
+        "ButtonForegroundPressed": "#C4BA94",
+        "ButtonForegroundDisabled": "#6B6650",
+    }
+    _BV_BOX_DARK = {
+        "TextControlBackground": "#141414",
+        "TextControlBackgroundPointerOver": "#141414",
+        "TextControlBackgroundFocused": "#141414",
+        "TextControlForeground": "#D9CFA6",
+        "TextControlForegroundPointerOver": "#D9CFA6",
+        "TextControlForegroundFocused": "#D9CFA6",
+        "TextControlBorderBrush": "#585858",
+        "TextControlBorderBrushPointerOver": "#7A7A7A",
+        "TextControlBorderBrushFocused": "#9A9A9A",
+        "TextControlPlaceholderForeground": "#8A846C",
+        "TextControlPlaceholderForegroundPointerOver": "#8A846C",
+        "TextControlPlaceholderForegroundFocused": "#8A846C",
+    }
+
+    def _bv_pt(self, x: float, y: float) -> tuple:
+        return ((x - self._BV_OX) * self._BV_SCALE,
+                (y - self._BV_OY) * self._BV_SCALE)
+
+    def _bv_poly(self, canvas, pts, stroke, *, width=1.2, fill=None,
+                 close: bool = False) -> None:
+        if close:
+            pts = list(pts) + [pts[0]]
+        coll = PointCollection()
+        for x, y in pts:
+            px, py = self._bv_pt(x, y)
+            coll.Append(Point(px, py))
+        pl = Polyline()
+        pl.Points = coll
+        pl.Stroke = stroke
+        pl.StrokeThickness = width
+        pl.StrokeLineJoin = PenLineJoin.Round
+        if fill is not None:
+            pl.Fill = fill
+        canvas.Children.Append(pl)
+
+    def _bv_rpoly(self, canvas, pts, stroke, radius, *, width=1.2,
+                  fill=None) -> None:
+        """闭合多边形折角圆角化：每个顶点沿两侧边各缩进 radius，配 Round 接头。"""
+        n = len(pts)
+        rounded = []
+        for i in range(n):
+            px, py = pts[i]
+            ax, ay = pts[i - 1]
+            bx, by = pts[(i + 1) % n]
+            for (sx, sy), (ex, ey) in (((px, py), (ax, ay)),
+                                       ((px, py), (bx, by))):
+                dx, dy = sx - ex, sy - ey
+                dist = math.hypot(dx, dy)
+                if dist <= 0:
+                    continue
+                k = min(radius, dist / 2) / dist
+                rounded.append((sx - dx * k, sy - dy * k))
+        self._bv_poly(canvas, rounded, stroke, width=width, fill=fill,
+                      close=True)
+
+    def _bv_ring(self, canvas, cx, cy, r, stroke, *, width=1.2,
+                 fill=None) -> None:
+        e = Ellipse()
+        side = r * 2 * self._BV_SCALE
+        px, py = self._bv_pt(cx, cy)
+        e.Width = side
+        e.Height = side
+        Canvas.SetLeft(e, px - side / 2)
+        Canvas.SetTop(e, py - side / 2)
+        e.Stroke = stroke
+        e.StrokeThickness = width
+        if fill is not None:
+            e.Fill = fill
+        canvas.Children.Append(e)
+
+    def _bv_dark(self, control, keys: dict) -> None:
+        rd = control.Resources
+        for key, raw in keys.items():
+            rd[key] = theme.solid(raw)
+
+    def _bv_tip(self, element, message: str) -> None:
+        tip = ToolTip()
+        content = W.text(message, size=12, color="text2", wrap=True)
+        content.MaxWidth = 220
+        tip.Content = content
+        ToolTipService.SetToolTip(element, tip)
+
+    def flash_button(self, bit: int, pressed: bool) -> None:
+        """shell 收到 ovc_button/ovc_button_up 事件后在 UI 线程调用。
+
+        真机只在电平变化时发一次边沿事件：长按=按下后无事件，直到抬起。
+        因此按下即点亮（保持到抬起沿），抬起时保证最短点亮 _BV_GLOW_MIN，
+        _BV_GLOW_MAX 仅作为丢抬起沿（如断连）的兜底熄灭。
+        """
+        found = False
+        now = time.monotonic()
+        for view in self._cards.values():
+            glow = view.button_glows.get(bit)
+            if glow is None:
+                continue
+            found = True
+            if pressed:
+                glow.Visibility = Visibility.Visible
+        if not found:
+            return
+        if pressed:
+            self._glow_state[bit] = (now, now + self._BV_GLOW_MAX)
+        else:
+            ts = self._glow_state.get(bit, (0.0, 0.0))[0]
+            self._glow_state[bit] = (ts, max(now, ts + self._BV_GLOW_MIN))
+
+    def _refresh_glows(self) -> None:
+        if not self._glow_state:
+            return
+        now = time.monotonic()
+        for bit, (_ts, until) in list(self._glow_state.items()):
+            if now < until:
+                continue
+            del self._glow_state[bit]
+            for view in self._cards.values():
+                glow = view.button_glows.get(bit)
+                if glow is not None:
+                    glow.Visibility = Visibility.Collapsed
+
+    def _binding_blocks(self, view: CardView) -> object:
+        bindings = self._active_bindings()
+        bg = theme.solid(self._BV_BG)
+        edges = [theme.solid(c) for c in self._BV_EDGE]
+        art = theme.solid(self._BV_ART)
+        art2 = theme.solid(self._BV_ART2)
+        glyph = theme.solid(self._BV_GLYPH)
+        lead = theme.solid(self._BV_LEAD)
+        dot = theme.solid(self._BV_DOT)
+
+        canvas = Canvas()
+        canvas.Width = 1040
+        canvas.Height = 340
+        view.binding_canvas = canvas
+
+        def at(el, x, y):
+            Canvas.SetLeft(el, float(x))
+            Canvas.SetTop(el, float(y))
+            canvas.Children.Append(el)
+
+        x0, y0, x1, y1, ch = self._BV_BODY
+
+        def octagon(a, b, c, d, k):
+            return [(a + k, b), (c - k, b), (c, b + k), (c, d - k),
+                    (c - k, d), (a + k, d), (a, d - k), (a, b + k)]
+
+        # 机身：三层切角描边（上下轮廓一致，无齿状凸起）
+        self._bv_poly(canvas, octagon(x0, y0, x1, y1, ch), edges[0],
+                      width=1.4, fill=bg, close=True)
+        self._bv_poly(canvas, octagon(x0 + 5, y0 + 5, x1 - 5, y1 - 5, ch - 3),
+                      edges[1], width=1.0, close=True)
+        self._bv_poly(canvas, octagon(x0 + 10, y0 + 10, x1 - 10, y1 - 10,
+                                      ch - 5), edges[2], width=1.0, close=True)
+
+        # 屏显窗（中心 x=316，与机身同轴）
+        sx0, sy0, sx1, sy1 = self._BV_SCREEN
+        self._bv_poly(canvas, [(sx0, sy0), (sx1, sy0), (sx1, sy1),
+                               (sx0, sy1)], art, fill=bg, close=True)
+
+        # 十字方向键：收窄的双层圆角十字 + 双层中心圆 + 四向箭头（远离中心）
+        ccx, ccy, half, arm = self._BV_CXKEY
+
+        def cross(hf, af):
+            return [(ccx - af, ccy - hf), (ccx + af, ccy - hf),
+                    (ccx + af, ccy - af), (ccx + hf, ccy - af),
+                    (ccx + hf, ccy + af), (ccx + af, ccy + af),
+                    (ccx + af, ccy + hf), (ccx - af, ccy + hf),
+                    (ccx - af, ccy + af), (ccx - hf, ccy + af),
+                    (ccx - hf, ccy - af), (ccx - af, ccy - af)]
+
+        self._bv_rpoly(canvas, cross(half, arm), art, 3.5, width=1.3,
+                       fill=bg)
+        self._bv_rpoly(canvas, cross(half - 2.5, arm - 2.5), art2, 2.5,
+                       width=1.0)
+        self._bv_ring(canvas, ccx, ccy, 10, art, fill=bg)
+        self._bv_ring(canvas, ccx, ccy, 6.5, art2, width=1.0)
+        for pts in self._BV_DIRS.values():
+            self._bv_poly(canvas, pts, glyph, width=1.1, fill=bg, close=True)
+
+        # G/D/B/A 双环菱形键（簇中心 386，与十字键簇 246 关于轴 316 对称）
+        for fx, fy, _letter in self._BV_FACES.values():
+            self._bv_ring(canvas, fx, fy, 13, art, fill=bg)
+            self._bv_ring(canvas, fx, fy, 9.5, art2)
+
+        # 底部 SEL_1 / HOME / SEL_2 小键（◁ ▢ ▷ 双层线稿、圆角连接）
+        for outer, inner in self._BV_SMALLS.values():
+            self._bv_poly(canvas, outer, art, width=1.2, fill=bg, close=True)
+            self._bv_poly(canvas, inner, art2, width=0.9, close=True)
+
+        # 指示线（45° 斜段 + 平行横段），终点圆点落在按键正中心
+        for pts in self._BV_LINKS.values():
+            self._bv_poly(canvas, pts, lead, width=1.0)
+            ex, ey = pts[-1]
+            e = Ellipse()
+            e.Width = e.Height = 1.9 * 2 * self._BV_SCALE
+            px, py = self._bv_pt(ex, ey)
+            Canvas.SetLeft(e, px - e.Width / 2)
+            Canvas.SetTop(e, py - e.Height / 2)
+            e.Fill = dot
+            canvas.Children.Append(e)
+
+        # 键面字母最后画，压在圆点之上
+        for fx, fy, letter in self._BV_FACES.values():
+            t = W.text(letter, size=16, bold=W.SEMIBOLD, align="center")
+            t.Foreground = glyph
+            t.Width = 28
+            at(t, *self._bv_pt(fx, fy))
+            Canvas.SetLeft(t, Canvas.GetLeft(t) - 14)
+            Canvas.SetTop(t, Canvas.GetTop(t) - 12)
+
+        # 按下反馈高亮层：默认隐藏，收到 ovc_button 事件时点亮
+        glow_fill = SolidColorBrush(self._BV_GLOW_FILL)
+        glow_stroke = SolidColorBrush(self._BV_GLOW_STROKE)
+        for bit, (gx, gy, gr) in self._BV_GLOW.items():
+            e = Ellipse()
+            side = gr * 2 * self._BV_SCALE
+            px, py = self._bv_pt(gx, gy)
+            e.Width = side
+            e.Height = side
+            Canvas.SetLeft(e, px - side / 2)
+            Canvas.SetTop(e, py - side / 2)
+            e.Fill = glow_fill
+            e.Stroke = glow_stroke
+            e.StrokeThickness = 1.4
+            e.Visibility = Visibility.Collapsed
+            view.button_glows[bit] = e
+            canvas.Children.Append(e)
+
+        # 标注：原生默认样式按钮（点击文字弹出选择框改绑）；
+        # OSC 时输入框与按钮错开摆放（左列在左、右列在右、中间在下方）
+        for bit, (ax, ly, width, align) in self._BV_LABELS.items():
+            px, py = self._bv_pt(ax, ly)
+            btn = self._binding_label(view, bit, bindings, width=width,
+                                      x=px, y=py - self._BV_BTN_H / 2,
+                                      align=align)
+            if bit == 2:
+                self._bv_tip(btn, "HOME 键连点 5 下，设备进入可被插槽搜索"
+                                  "连接的状态")
+            at(btn, Canvas.GetLeft(btn), Canvas.GetTop(btn))
+
+        wrapper = W.stack()
+        wrapper.HorizontalAlignment = W._HALIGN["center"]
+        wrapper.Children.Append(canvas)
+        panel = W.box(background=bg, corner=10, padding=Thickness(14, 10, 14, 10),
+                      child=wrapper, h="stretch")
+        return panel
+
+    def _binding_label(self, view: CardView, bit: int, bindings,
+                       *, width: float, x: float, y: float,
+                       align: str) -> object:
+        current = str(bindings.get(str(bit), "none"))
+
+        label = W.text(self._binding_label_text(current), size=15,
+                       trimming=True)
+        label.Foreground = theme.solid(self._BV_TEXT)
+        label.Width = width
+        if align == "right":
+            label.TextAlignment = TextAlignment.Right
+        elif align == "center":
+            label.TextAlignment = TextAlignment.Center
+        view.bindings[bit] = label
+
+        flyout = MenuFlyout()
+        for key, text_label in live.BUTTON_ACTIONS:
+            item = MenuFlyoutItem()
+            item.Text = text_label
+            item.Click += self._make_binding_click(view, bit, key)
+            flyout.Items.Append(item)
+
+        # 保留原生默认 Button 模板（点击弹出系统选择框观感），仅通过
+        # 控件级资源键固定深色系配色，使亮色主题下画布内控件不翻浅。
+        # OSC 绑定时按钮保持可见（仍可点开选择框改回其他动作），
+        # 输入框错开摆放：左列在按钮左侧、右列在右侧、中间在下方。
+        bw = width + 12
+        if align == "right":
+            bx = x - bw
+        elif align == "center":
+            bx = x - bw / 2
+        else:
+            bx = x
+        btn = W.button(label, width=bw, height=self._BV_BTN_H)
+        btn.Padding = W.uniform(2)
+        btn.Flyout = flyout
+        self._bv_dark(btn, self._BV_BTN_DARK)
+        Canvas.SetLeft(btn, float(bx))
+        Canvas.SetTop(btn, float(y))
+
+        box = self._binding_input(view, bit,
+                                  current[4:] if current.startswith("osc:") else "",
+                                  self._BV_BOX_W)
+        keybox = self._binding_key_capture(view, bit,
+                                           current[4:] if current.startswith("key:") else "",
+                                           self._BV_BOX_W)
+        if align == "right":
+            box_x, box_y = bx - 4 - self._BV_BOX_W, y + 1
+        elif align == "left":
+            box_x, box_y = bx + bw + 4, y + 1
+        else:
+            box_x, box_y = bx, y + self._BV_BTN_H + 4
+        box.Visibility = Visibility.Visible if current.startswith("osc:") \
+            else Visibility.Collapsed
+        keybox.Visibility = Visibility.Visible if current.startswith("key:") \
+            else Visibility.Collapsed
+
+        canvas = view.binding_canvas
+        if canvas is not None:
+            for input_box in (box, keybox):
+                Canvas.SetLeft(input_box, float(box_x))
+                Canvas.SetTop(input_box, float(box_y))
+                canvas.Children.Append(input_box)
+        return btn
+
+    def _binding_input(self, view: CardView, bit: int, address: str,
+                       width: float) -> object:
+        box = W.text_box(text=address, width=width)
+        box.FontSize = 10
+        box.Height = 28
+        box.PlaceholderText = "/avatar/parameters/…"
+        self._bv_dark(box, self._BV_BOX_DARK)
 
         def _changed(sender, args):
             if self._updating:
                 return
-            index = combo.SelectedIndex
-            if 0 <= index < len(live.BUTTON_ACTIONS):
-                bindings[str(bit)] = live.BUTTON_ACTIONS[index][0]
+            cfg = self._active_bindings()
+            cfg[str(bit)] = "osc:" + (box.Text or "").strip()
 
-        combo.SelectionChanged += _changed
-        cell = W.stack(spacing=4)
-        cell.Children.Append(W.text(f"{name} (bit{bit})", size=11, color="text3"))
-        cell.Children.Append(combo)
-        return cell
+        box.TextChanged += _changed
+        view.binding_inputs[bit] = box
+        return box
+
+    def _binding_key_capture(self, view: CardView, bit: int, name: str,
+                             width: float) -> object:
+        """键盘绑定捕获框: 点击聚焦后按下任意键完成绑定."""
+        box = W.text_box(text=name, width=width)
+        box.FontSize = 10
+        box.Height = 28
+        box.PlaceholderText = "点击此处后按下要绑定的按键"
+        self._bv_dark(box, self._BV_BOX_DARK)
+
+        def _on_key(sender, args):
+            try:
+                vk = int(getattr(args.Key, "Value", args.Key))
+            except (TypeError, ValueError):
+                return
+            args.Handled = True
+            label = keyboard_keys.key_name(vk)
+            self._active_bindings()[str(bit)] = "key:" + label
+            self._updating = True
+            try:
+                box.Text = label
+            finally:
+                self._updating = False
+            text = view.bindings.get(bit)
+            if text is not None:
+                text.Text = self._binding_label_text("key:" + label)
+
+        box.KeyDown += _on_key
+        view.binding_keys[bit] = box
+        return box
+
+    def _binding_label_text(self, key: str) -> str:
+        if key.startswith("osc:"):
+            address = key[4:].strip()
+            return f"OSC {address}" if address else "OSC 参数"
+        if key.startswith("key:"):
+            name = key[4:].strip()
+            return f"键盘 {name}" if name else "键盘按键"
+        for action_key, label in live.BUTTON_ACTIONS:
+            if action_key == key:
+                return label
+        return key
+
+    def _make_binding_click(self, view: CardView, bit: int, key: str):
+        def handler(sender, args):
+            self._set_binding(view, bit, key)
+
+        return handler
+
+    def _set_binding(self, view: CardView, bit: int, key: str) -> None:
+        bindings = self._active_bindings()
+        label = view.bindings.get(bit)
+        box = view.binding_inputs.get(bit)
+        keybox = view.binding_keys.get(bit)
+        if key == "osc":
+            current = str(bindings.get(str(bit), ""))
+            address = current[4:] if current.startswith("osc:") else ""
+            bindings[str(bit)] = "osc:" + address
+            if box is not None:
+                self._updating = True
+                try:
+                    box.Text = address
+                finally:
+                    self._updating = False
+                box.Visibility = Visibility.Visible
+            if keybox is not None:
+                keybox.Visibility = Visibility.Collapsed
+            if label is not None:
+                label.Text = self._binding_label_text("osc:" + address)
+                label.Foreground = theme.solid(self._BV_TEXT)
+            return
+        if key == "key":
+            current = str(bindings.get(str(bit), ""))
+            name = current[4:] if current.startswith("key:") else ""
+            bindings[str(bit)] = "key:" + name
+            if keybox is not None:
+                self._updating = True
+                try:
+                    keybox.Text = name
+                finally:
+                    self._updating = False
+                keybox.Visibility = Visibility.Visible
+            if box is not None:
+                box.Visibility = Visibility.Collapsed
+            if label is not None:
+                label.Text = self._binding_label_text("key:" + name)
+                label.Foreground = theme.solid(self._BV_TEXT)
+            return
+        bindings[str(bit)] = key
+        if box is not None:
+            box.Visibility = Visibility.Collapsed
+        if keybox is not None:
+            keybox.Visibility = Visibility.Collapsed
+        if label is not None:
+            label.Text = self._binding_label_text(key)
+            label.Foreground = theme.solid(self._BV_TEXT)
 
     def _sensor_card(self, view: CardView, sid: str, slot):
         engine = self.shell.engine

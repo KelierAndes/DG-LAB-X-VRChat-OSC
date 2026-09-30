@@ -87,10 +87,22 @@ def _run_selftest() -> None:
                 led = ovc.led_combo
                 led.SelectedIndex = 2
                 REPORT["led_pick_ok"] = led.SelectedIndex == 2
-                binding = next(iter(ovc.bindings.values()))
-                binding.SelectedIndex = 1
-                REPORT["binding_pick_ok"] = binding.SelectedIndex == 1
+                control._set_binding(ovc, 13, "fire")
+                bind_label = ovc.bindings.get(13)
+                REPORT["binding_pick_ok"] = (bind_label is not None
+                                             and bind_label.Text == control._binding_label_text("fire"))
                 page._updating = True
+
+                from win32more.Microsoft.UI.Xaml import Visibility
+                glow = ovc.button_glows.get(13)
+                control.flash_button(13, True)
+                lit = glow is not None and glow.Visibility == Visibility.Visible
+                control.flash_button(13, False)
+                held = glow.Visibility == Visibility.Visible  # 最短点亮窗口
+                control._glow_state[13] = (0.0, 0.0)          # 模拟到期
+                control._refresh_glows()
+                REPORT["glow_flash_ok"] = (lit and held
+                                           and glow.Visibility == Visibility.Collapsed)
 
                 win.goto("dashboard")
                 win._page("dashboard").tick()
@@ -118,6 +130,19 @@ def _run_selftest() -> None:
 
 def main() -> int:
     selftest = "--selftest" in sys.argv
+    if selftest:
+        def _probe_engine():
+            from app import Engine
+
+            path = os.path.join(tempfile.gettempdir(), "dglab_osc_selftest_cfg.json")
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            return Engine(config_path=path)
+
+        App.engine_factory = _probe_engine
     code = 0
     try:
         if selftest:

@@ -12,6 +12,7 @@ from typing import Any
 import socket as _socket
 
 from dglab.ble import BleClient
+from dglab import keys as keyboard_keys
 from dglab.official_waveforms import CoyoteWaveform
 from dglab.relay_v3 import RelayV3Server
 from dglab.relay_v4 import RelayV4Server
@@ -46,9 +47,11 @@ class Config(dict):
             "strength_balance_a": 0,
             "strength_balance_b": 0,
             "ovc_buttons": {
-                "0": "none", "1": "none", "2": "none",
-                "8": "none", "9": "none", "10": "none", "11": "none",
-                "12": "none", "13": "fire", "14": "none", "15": "none",
+                "0": "a_strength_zero", "1": "b_strength_zero", "2": "none",
+                "8": "a_strength_up", "9": "a_strength_down",
+                "10": "a_wave_up", "11": "a_wave_down",
+                "12": "b_wave_down", "13": "b_strength_down",
+                "14": "b_wave_up", "15": "b_strength_up",
             },
         },
         "osc": dict(OscConfig.DEFAULTS),
@@ -132,7 +135,9 @@ class Engine:
         }
         self.osc: OscBridge | None = None
         self._fire_holds: dict[str, dict] = {}
+        self._migrate_ovc_profiles()
         self.events.on("ovc_button", self._on_ovc_button)
+        self.events.on("ovc_button_up", self._on_ovc_button_up)
         self.events.on("frame_log", lambda d, f: self.log_frame(d, f))
         self.events.on("log", self._file_only)
 
@@ -224,6 +229,7 @@ class Engine:
                 pass
             self._backend = None
         await self._stop_relay()
+        self.events.emit("state", self.get_state())
 
     async def connect_v4(self) -> None:
         await self._disconnect_backend()
@@ -687,7 +693,7 @@ class Engine:
         if isinstance(backend, BleClient):
             await backend.set_led(color, slot_id=self.resolve_slot(slot_id))
         else:
-            self._log("LED 颜色切换目前仅支持蓝牙直连 (负鼠/灵猫)")
+            self._log("LED 颜色切换目前仅支持蓝牙直连 (郊狼/负鼠/灵猫)")
 
     async def bmtr_flip(self, slot_id: str | None = None) -> None:
         backend = self._require_backend()
@@ -709,8 +715,36 @@ class Engine:
             return backend.monitors.get(sid) if sid else None
         return None
 
+    def _migrate_ovc_profiles(self) -> None:
+        """旧版单一 ovc_buttons 映射迁移为配置文件组 (ovc_profiles + ovc_profile)."""
+        ble = self.config.setdefault("ble", {})
+        profiles = ble.get("ovc_profiles")
+        if not isinstance(profiles, dict) or not profiles:
+            ble["ovc_profiles"] = {"默认": dict(ble.get("ovc_buttons") or {})}
+        if not ble.get("ovc_profile"):
+            ble["ovc_profile"] = next(iter(ble["ovc_profiles"]), "默认")
+
+    def _ovc_bindings(self) -> dict[str, str]:
+        """当前激活配置文件的按键映射 (旧 ovc_buttons 作为兜底)."""
+        ble = self.config.get("ble", {})
+        profiles = ble.get("ovc_profiles") or {}
+        active = ble.get("ovc_profile") or next(iter(profiles), "默认")
+        return profiles.get(active) or ble.get("ovc_buttons") or {}
+
     def _on_ovc_button(self, slot_id: str, bit: int) -> None:
-        binding = self.config.get("ble", {}).get("ovc_buttons", {}).get(str(bit), "none")
+        binding = self._ovc_bindings().get(str(bit), "none")
+        if binding.startswith("osc:"):
+            self._send_osc_binding(binding[4:], 1)
+            return
+        if binding.startswith("key:"):
+            name = binding[4:].strip()
+            if name:
+                ok = keyboard_keys.press(name)
+                target = keyboard_keys.foreground_window()
+                self._log(f"按键 bit{bit} → 键盘 {name} 按下"
+                          + ("" if ok else " (注入失败)")
+                          + (f" [前台: {target}]" if target else " [无前台窗口]"))
+            return
         if binding not in self._OVC_BUTTON_ACTIONS:
             return
         self._log(f"按键 bit{bit} → {binding}")
@@ -719,9 +753,11 @@ class Engine:
 
         async def _run() -> None:
             if binding == "fire":
-                await self.fire(slot_id=slot_id)
+                await self.fire_start(slot_id=slot_id)
             elif binding == "estop":
                 await self.emergency_stop()
+            elif binding.endswith("_zero"):
+                await self.set_strength(channel, 0, slot_id=slot_id)
             elif binding.endswith("_up") or binding.endswith("_down"):
                 delta = +1 if binding.endswith("_up") else -1
                 if "strength" in binding:
@@ -734,10 +770,43 @@ class Engine:
             asyncio.run_coroutine_threadsafe(_run(), self.loop)
 
     _OVC_BUTTON_ACTIONS = ("none", "a_strength_up", "a_strength_down",
+                           "a_strength_zero",
                            "a_wave_up", "a_wave_down",
                            "b_strength_up", "b_strength_down",
+                           "b_strength_zero",
                            "b_wave_up", "b_wave_down",
                            "fire", "estop")
+
+    def _on_ovc_button_up(self, slot_id: str, bit: int) -> None:
+        binding = self._ovc_bindings().get(str(bit), "none")
+        if binding.startswith("osc:"):
+            self._send_osc_binding(binding[4:], 0)
+            return
+        if binding.startswith("key:"):
+            name = binding[4:].strip()
+            if name:
+                keyboard_keys.release(name)
+                target = keyboard_keys.foreground_window()
+                self._log(f"按键 bit{bit} → 键盘 {name} 松开"
+                          + (f" [前台: {target}]" if target else ""))
+            return
+        if binding == "fire":
+            async def _stop() -> None:
+                await self.fire_stop(slot_id=slot_id)
+
+            if self.loop is not None and self.loop.is_running():
+                asyncio.run_coroutine_threadsafe(_stop(), self.loop)
+
+    def _send_osc_binding(self, address: str, value: int) -> None:
+        address = address.strip()
+        if not address:
+            return
+        osc = self.osc
+        if osc is None or not getattr(osc, "_running", False):
+            self._log(f"OSC 桥接未运行，无法发送 {address} = {value}")
+            return
+        osc.send_value(address, value)
+        self._log(f"OSC {address} = {value}")
 
     def _device_step(self, slot_id: str) -> int:
         try:

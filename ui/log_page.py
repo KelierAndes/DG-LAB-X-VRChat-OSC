@@ -65,6 +65,7 @@ class LogPage(XamlClass, Page):
             b.Background = theme.brush("accent")
             b.BorderBrush = theme.brush("accent")
             b.Foreground = theme.brush("on_accent")
+            W.solid_button_states(b, theme.color("accent"), theme.brush("on_accent"))
         b.Click += _click(self._select_level, level)
         return b
 

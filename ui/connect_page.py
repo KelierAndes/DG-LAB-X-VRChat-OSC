@@ -24,7 +24,6 @@ class ConnectPage(XamlClass, Page):
         self.shell = shell
         self._scan_results: list[dict] = []
         self._selected_scan: str | None = None
-        self._saved_list: list[dict] = []
         self._cards: dict[str, dict] = {}
         self._last_qr = ""
         self._backend_seen = None
@@ -47,6 +46,7 @@ class ConnectPage(XamlClass, Page):
         if now - self._last_device_render >= 0.5:
             self._last_device_render = now
             self._update_devices()
+            self._update_saved()
 
     def on_notify(self) -> None:
         self.rebuild()
@@ -180,18 +180,12 @@ class ConnectPage(XamlClass, Page):
                                               on_click=lambda s, e: self._connect_ble()))
         actions.Children.Append(W.text_button("断开选中", symbol="DisconnectDrive",
                                               on_click=lambda s, e: self._disconnect_selected()))
+        actions.Children.Append(W.text_button("删除记录", symbol="Delete",
+                                              on_click=lambda s, e: self._forget_saved()))
 
         scan_host = W.stack(spacing=0, h="stretch")
         scan_caption = W.text("尚未扫描：点击「扫描设备」开始 (约 6 秒)",
                               size=12, color="text3", v="center")
-
-        saved_box = W.combo((), width=280)
-        saved_tools = W.stack(horizontal=True, spacing=8, v="center")
-        saved_tools.Children.Append(saved_box)
-        saved_tools.Children.Append(W.text_button("重连", symbol="Refresh",
-                                                  on_click=lambda s, e: self._reconnect_saved()))
-        saved_tools.Children.Append(W.text_button("删除记录", symbol="Delete",
-                                                  on_click=lambda s, e: self._forget_saved()))
 
         auto_switch = W.switch(bool(engine.config.get("auto_reconnect", True)))
 
@@ -208,11 +202,14 @@ class ConnectPage(XamlClass, Page):
         auto_row.Children.Append(auto_switch)
 
         devices_host = W.stack(spacing=0, h="stretch")
+        saved_rows_host = W.stack(spacing=0, h="stretch")
 
-        saved = W.stack(spacing=6, h="stretch")
-        saved.Children.Append(W.text("已保存设备（支持一键重连）", size=11,
+        saved = W.stack(spacing=8, h="stretch")
+        saved.Children.Append(W.text("已保存设备（点击选中后可连接 / 删除记录）", size=11,
                                      bold=W.SEMIBOLD, color="text3"))
-        saved.Children.Append(saved_tools)
+        saved.Children.Append(W.box(
+            corner=6, border=theme.brush("stroke"), background=theme.brush("track"),
+            child=saved_rows_host, h="stretch"))
         saved.Children.Append(auto_row)
 
         inner = W.stack(spacing=12, h="stretch")
@@ -234,9 +231,9 @@ class ConnectPage(XamlClass, Page):
             size=11, color="text3", wrap=True))
 
         refs.update(pill_host=pill_host, scan_host=scan_host, scan_caption=scan_caption,
-                    saved_box=saved_box, devices_host=devices_host)
+                    devices_host=devices_host, saved_rows_host=saved_rows_host)
         self._cards["ble"] = refs
-        self._fill_saved_devices()
+        self._update_saved()
         self._render_scan_rows()
         return W.card(inner)
 
@@ -298,20 +295,33 @@ class ConnectPage(XamlClass, Page):
         state = self.shell.state
         for key in ("v4", "v3"):
             refs = self._cards.get(key)
-            if refs is None or key != state.backend:
+            if key != state.backend:
+                if refs.get("pairing_open"):
+                    refs["pairing_open"] = False
+                    W.set_expanded(refs["pairing"], False)
+                    refs["status"].Text = "未连接"
+                    refs["ids"].Text = ""
+                    refs["payload"].Text = "二维码内容会显示在这里"
+                    self._last_qr = ""
                 continue
             if state.qr_text and state.qr_text != self._last_qr:
                 self._last_qr = state.qr_text
                 self._show_qr(refs["qr_image"], state.qr_text)
                 refs["payload"].Text = state.qr_text
                 W.set_expanded(refs["pairing"], True)
+                refs["pairing_open"] = True
+            if not state.qr_text and refs.get("pairing_open"):
+                refs["pairing_open"] = False
+                W.set_expanded(refs["pairing"], False)
+                self._last_qr = ""
             ids = []
             if state.client_id:
                 ids.append(f"本机 ID: {state.client_id}")
             if state.target_id:
                 ids.append(f"对端: {state.target_id}")
             refs["ids"].Text = "\n".join(ids)
-            refs["status"].Text = state.status_text or "等待连接…"
+            refs["status"].Text = (state.status_text
+                                   or ("等待扫码配对" if state.qr_text else "未连接"))
             refs["pairing"].Visibility = Visibility.Visible
 
     def _update_devices(self) -> None:
@@ -469,51 +479,88 @@ class ConnectPage(XamlClass, Page):
         return button
 
     def _connect_ble(self) -> None:
-        if not self._selected_scan:
-            self.shell.logs.append("请先扫描并选择一台设备")
+        address = self._selected_scan
+        if not address:
+            self.shell.logs.append("请先在列表中点击选择设备")
             return
         for dev in self._scan_results:
-            if dev.get("address") == self._selected_scan:
+            if dev.get("address") == address:
                 self.shell.submit(self.shell.engine.ble_connect(dev["address"], dev["kind"]))
                 return
-        self.shell.submit(self.shell.engine.ble_reconnect_saved(self._selected_scan))
+        for dev in self.shell.engine.saved_device_list():
+            if dev.get("address") == address:
+                self.shell.submit(self.shell.engine.ble_reconnect_saved(address))
+                return
+        self.shell.logs.append("所选设备不在扫描结果或已保存记录中，请重新扫描")
 
-    def _fill_saved_devices(self) -> None:
+    def _update_saved(self) -> None:
         refs = self._cards.get("ble")
         if refs is None:
             return
-        self._saved_list = self.shell.engine.saved_device_list()
-        box = refs["saved_box"]
-        box.Items.Clear()
-        for dev in self._saved_list:
-            item = _combo_item(
-                f"{dev.get('name', '?')} [{dev.get('kind', '?')}] {dev.get('address', '')}")
-            box.Items.Append(item)
-        if self._saved_list:
-            box.SelectedIndex = 0
-
-    def _selected_saved_address(self) -> str | None:
-        refs = self._cards.get("ble")
-        if refs is None:
-            return None
-        index = refs["saved_box"].SelectedIndex
-        if index is None or index < 0 or index >= len(self._saved_list):
-            return None
-        return self._saved_list[index].get("address")
-
-    def _reconnect_saved(self) -> None:
-        address = self._selected_saved_address()
-        if not address:
-            self.shell.logs.append("请先选择一台已保存的设备")
+        saved = self.shell.engine.saved_device_list()
+        sig = (tuple(d.get("address") for d in saved), self._selected_scan)
+        host = refs["saved_rows_host"]
+        if refs.get("saved_sig") == sig and host.Children.Size > 0:
             return
-        self.shell.submit(self.shell.engine.ble_reconnect_saved(address))
+        refs["saved_sig"] = sig
+        host.Children.Clear()
+        if not saved:
+            host.Children.Append(W.box(
+                height=40, padding=Thickness(10, 0, 10, 0),
+                child=W.text("暂无保存记录：连接成功的设备会自动记录",
+                             size=12, color="text3", v="center"),
+                h="stretch"))
+            return
+        for i, dev in enumerate(saved):
+            if i:
+                host.Children.Append(W.divider())
+            host.Children.Append(self._saved_row(dev))
+
+    def _saved_row(self, dev: dict):
+        address = dev.get("address", "")
+        selected = address == self._selected_scan
+
+        def _pick(sender, args, target=address):
+            self._selected_scan = target
+            self._update_saved()
+            self._update_devices()
+
+        g = W.grid(W.fixed(26), W.star(1), W.auto())
+        g.ColumnSpacing = 10
+        mark = W.box(
+            width=14, height=14, corner=7,
+            border=theme.brush("accent" if selected else "text3"),
+            border_thickness=1.5,
+            background=theme.brush("accent") if selected else None,
+            v="center", h="center")
+        g.Children.Append(W.put(mark, 0))
+        names = W.stack(spacing=1, v="center")
+        names.Children.Append(W.text(dev.get("name", "?"), size=13,
+                                     bold=W.SEMIBOLD, trimming=True))
+        names.Children.Append(W.text(
+            f"{dev.get('kind_label', dev.get('kind', '?'))} · {address}",
+            size=11, color="text3", trimming=True))
+        g.Children.Append(W.put(names, 1))
+        g.Children.Append(W.put(W.pill(
+            "已选中" if selected else "已保存",
+            "accent_text" if selected else "text3",
+            "accent_soft" if selected else "track"), 2))
+        row = W.box(height=48, padding=Thickness(10, 0, 10, 0), child=g)
+        button = W.button(row, h="stretch")
+        button.HorizontalContentAlignment = W._HALIGN["stretch"]
+        button.Click += _pick
+        return button
 
     def _forget_saved(self) -> None:
-        address = self._selected_saved_address()
+        address = self._selected_scan
         if not address:
+            self.shell.logs.append("请先在列表中点击选择设备")
+            return
+        if not any(d.get("address") == address
+                   for d in self.shell.engine.saved_device_list()):
+            self.shell.logs.append("所选设备没有保存记录")
             return
         self.shell.engine.forget_device(address)
-        self._fill_saved_devices()
 
     def _disconnect_selected(self) -> None:
         address = self._selected_scan
@@ -562,8 +609,6 @@ def _combo_item(content: str):
     from win32more.Microsoft.UI.Xaml.Controls import ComboBoxItem
     item = ComboBoxItem()
     item.Content = content
-    return item
-
 def _gap(el, left: float):
     if left:
         el.Margin = Thickness(left, 0, 0, 0)

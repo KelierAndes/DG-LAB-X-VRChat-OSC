@@ -69,6 +69,8 @@ class MainWindow(XamlClass, Window):
         engine.events.on("state", self._on_engine_state)
         engine.events.on("log", self._on_engine_log)
         engine.events.on("saved_devices", lambda devs: self._notify("connect"))
+        engine.events.on("ovc_button", self._on_ovc_button)
+        engine.events.on("ovc_button_up", self._on_ovc_button_up)
 
         timer = self.DispatcherQueue.CreateTimer()
         timer.Interval = TimeSpan(Duration=100_000)
@@ -115,6 +117,21 @@ class MainWindow(XamlClass, Window):
 
     def _on_engine_log(self, msg: str) -> None:
         self.logs.append(msg, from_engine=True)
+
+    def _on_ovc_button(self, slot_id: str, bit: int) -> None:
+        self._flash_button(bit, True)
+
+    def _on_ovc_button_up(self, slot_id: str, bit: int) -> None:
+        self._flash_button(bit, False)
+
+    def _flash_button(self, bit: int, pressed: bool) -> None:
+        def _run():
+            page = self._pages.get("control")
+            flash = getattr(page, "flash_button", None)
+            if flash is not None:
+                flash(bit, pressed)
+
+        self.ui_queue.put(_run)
 
     def _notify(self, tag: str) -> None:
         def _run():
@@ -256,7 +273,8 @@ class App(XamlApplication):
         from app import Engine
 
         if App.engine is None:
-            engine = Engine()
+            factory = getattr(App, "engine_factory", None)
+            engine = factory() if factory is not None else Engine()
             engine.start()
             App.engine = engine
         self.window = MainWindow(App.engine)

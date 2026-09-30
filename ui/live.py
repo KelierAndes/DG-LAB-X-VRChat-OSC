@@ -21,11 +21,14 @@ OVC_BUTTON_BITS = [
 ]
 BUTTON_ACTIONS = [
     ("none", "无"),
-    ("a_strength_up", "A 强度+"), ("a_strength_down", "A 强度-"),
-    ("a_wave_up", "A 波形+"), ("a_wave_down", "A 波形-"),
-    ("b_strength_up", "B 强度+"), ("b_strength_down", "B 强度-"),
-    ("b_wave_up", "B 波形+"), ("b_wave_down", "B 波形-"),
-    ("fire", "一键开火"), ("estop", "急停"),
+    ("a_strength_up", "A 通道强度 +10"), ("a_strength_down", "A 通道强度 -10"),
+    ("a_strength_zero", "A 通道强度 归0"),
+    ("a_wave_up", "A 切换上一个波形"), ("a_wave_down", "A 切换下一个波形"),
+    ("b_strength_up", "B 通道强度 +10"), ("b_strength_down", "B 通道强度 -10"),
+    ("b_strength_zero", "B 通道强度 归0"),
+    ("b_wave_up", "B 切换上一个波形"), ("b_wave_down", "B 切换下一个波形"),
+    ("fire", "持续开火 (按住开火)"), ("estop", "急停"),
+    ("osc", "发送 OSC 参数…"), ("key", "模拟键盘按键…"),
 ]
 BUTTON_ACTION_LABELS = dict(BUTTON_ACTIONS)
 
@@ -110,6 +113,17 @@ class LogBuffer:
         if kw:
             lines = [line for line in lines if kw in line[2].lower()]
         return list(reversed(lines[-limit:]))
+
+LED_OPTIONS = (
+    (0x00, "熄灭", "#9AA0A6"),
+    (0x01, "黄色", "#F2C94C"),
+    (0x02, "红色", "#EB5757"),
+    (0x03, "紫色", "#9B51E0"),
+    (0x04, "蓝色", "#2F80ED"),
+    (0x05, "青色", "#27C4D3"),
+    (0x06, "绿色", "#27AE60"),
+)
+
 
 def round_step10(value: int) -> int:
     value = int(value)

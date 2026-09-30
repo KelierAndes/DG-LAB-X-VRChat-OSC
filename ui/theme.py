@@ -105,6 +105,11 @@ def _rgb(raw: str) -> Color:
     raw = raw.lstrip("#")
     return Color(255, *(int(raw[i : i + 2], 16) for i in (0, 2, 4)))
 
+def shade(color: Color, factor: float) -> Color:
+    return Color(255, int(color.R * factor), int(color.G * factor),
+                 int(color.B * factor))
+
+
 def solid(raw: str) -> SolidColorBrush:
     return SolidColorBrush(_rgb(raw))
 

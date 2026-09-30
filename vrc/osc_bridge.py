@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import threading
 import time
 from typing import Any
@@ -74,6 +75,7 @@ class OscBridge:
         self._task: asyncio.Task | None = None
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._out_ip: str = str(config["out_ip"])
         self._action_value = 0
         self._action_until = 0.0
         self._last_sent: dict[str, Any] = {}
@@ -89,6 +91,14 @@ class OscBridge:
             return
         self._action_value = int(action)
         self._action_until = time.monotonic() + 0.3
+
+    def send_value(self, address: str, value) -> None:
+        try:
+            self._client.send_message(address, value)
+        except Exception as exc:
+            log = getattr(self, "log", None)
+            if log is not None:
+                log(f"OSC 发送 {address} 失败: {exc!r}")
 
     def _map(self, address: str, handler) -> None:
         def tracked(addr, *args):
@@ -217,6 +227,19 @@ class OscBridge:
         else:
             asyncio.run_coroutine_threadsafe(coro, loop)
 
+    @staticmethod
+    def _local_ip() -> str:
+        """本机出口网卡 IP (UDP connect 不发包, 仅查路由)."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+            finally:
+                s.close()
+        except Exception:
+            return "127.0.0.1"
+
     async def start(self) -> None:
         if not self.config["enabled"] or self._running:
             return
@@ -224,15 +247,25 @@ class OscBridge:
 
         self._running = True
         self._loop = asyncio.get_running_loop()
+
+        out_ip = str(self.config["out_ip"])
+        if out_ip in ("127.0.0.1", "localhost", "::1"):
+            resolved = self._local_ip()
+            if resolved and resolved != out_ip:
+                self.log(f"[OSC] 发送目标由 {out_ip} 改为本机网卡地址 {resolved}"
+                         f" (部分加速器/驱动会拦截回环 UDP, 127.0.0.1 收不到)")
+                out_ip = resolved
+        self._client = SimpleUDPClient(out_ip, int(self.config["out_port"]))
+
         self._server = ThreadingOSCUDPServer(
-            ("127.0.0.1", int(self.config["in_port"])), self._dispatcher
+            ("0.0.0.0", int(self.config["in_port"])), self._dispatcher
         )
         self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._server_thread.start()
         self._task = asyncio.create_task(self._push_loop())
         self.log("[OSC] 桥接已启动: 输出 -> "
-                 f"{self.config['out_ip']}:{self.config['out_port']}, "
-                 f"监听 127.0.0.1:{self.config['in_port']}")
+                 f"{out_ip}:{self.config['out_port']}, "
+                 f"监听 0.0.0.0:{self.config['in_port']}")
 
     async def stop(self) -> None:
         self._running = False
@@ -250,12 +283,34 @@ class OscBridge:
     async def _push_loop(self) -> None:
         interval = 1.0 / max(1, int(self.config["rate_hz"]))
         prefix = self.config["prefix"]
+        tick = 0
         try:
             while self._running:
                 await asyncio.sleep(interval)
                 state = self.get_state()
                 self._push_state(state, prefix)
+                tick += 1
+                if tick % 10 == 0:
+                    self._send_keepalive()
         except asyncio.CancelledError:
+            pass
+
+    def _send_keepalive(self) -> None:
+        """从接收端口向 VRChat 发注册包, 使其把回传 OSC 发往本机网卡地址.
+
+        VRChat 只向"最近发来 OSC 的地址"回传数据; 若回环 UDP 被加速器等拦截,
+        用 127.0.0.1 学到的地址会导致反向链路同样失效, 故从 0.0.0.0:in_port
+        的套接字发往网卡地址, 让 VRChat 学到 (网卡IP, in_port)。
+        """
+        server = self._server
+        if server is None:
+            return
+        try:
+            builder = OscMessageBuilder("/dglab/keepalive")
+            builder.add_arg(1)
+            server.socket.sendto(builder.build().dgram,
+                                 (self._out_ip, int(self.config["out_port"])))
+        except Exception:
             pass
 
     def _push_state(self, state: EngineState, prefix: str) -> None:
