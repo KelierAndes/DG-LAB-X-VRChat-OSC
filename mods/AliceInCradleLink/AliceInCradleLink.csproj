@@ -73,12 +73,17 @@
     </Reference>
   </ItemGroup>
 
-  <!-- dotnet build -t:Deploy 直接把 dll 复制到游戏的 BepInEx/plugins 下 -->
+  <!-- dotnet build -t:Deploy 直接把 dll 复制到游戏的 BepInEx/plugins 下；
+       同时同步一份到模块携带目录（modules/alice_cradle/mods/），
+       供 DGStudio 模块页「一键安装游戏模组」释放 -->
   <Target Name="Deploy" AfterTargets="Build">
     <Copy SourceFiles="$(TargetPath)"
           DestinationFolder="$(GameDir)\BepInEx\plugins\AliceInCradleLink"
           SkipUnchangedFiles="true"
           Condition="Exists('$(GameDir)\BepInEx')" />
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(MSBuildThisFileDirectory)..\..\modules\alice_cradle\mods"
+          SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

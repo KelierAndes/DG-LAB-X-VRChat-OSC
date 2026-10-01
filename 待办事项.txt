@@ -72,3 +72,45 @@ main.py --selftest EXIT=0；dotnet build -t:Deploy 0 警告并已部署；
 
 验证：unittest 172 项全过；selftest EXIT=0；build_exe 重建 dist 且打包 selftest 通过；
 用户运行期写入的配置（自定义表达式、新增映射行）完整保留。
+
+第八轮（弹窗遮罩层级 + 实时数据子卡片 + 联动页卡顿）：
+✔ 30.修复 ContentDialog 遮罩盖不住下拉/联想浮层：Popup 层恒在遮罩之上（平台限制），
+    弹窗前收起全部打开的浮层（GetOpenPopupsForXamlRoot，缺投影退回全树收 ComboBox）
+✔ 31.每张联动模块卡片顶部新增「实时数据」子卡片：模块输入数值实时状态，中英对照
+    （中文说明 + 变量名），3 列网格压缩排版，tick 0.5s 刷新，只读
+✔ 32.联动页打开/添加映射卡顿：根因为每次重建急切创建数千浮层控件（每行参数
+    MenuFlyout 全量 varpool 项 + AutoSuggestBox 联想项）；改为 MenuFlyout 首次
+    Opening 惰性填充、suggest_box 首次聚焦/输入时填充联想项，重建控件量降约 2/3
+
+验证：unittest 172 项全过；selftest EXIT=0；实机截图确认实时数据子卡片渲染与
+POST /data 注入后的实时刷新；build_exe 重建 dist 且打包 selftest 通过。
+
+第九轮（modules 提升到 exe 同级 + 携带游戏模组一键安装）：
+✔ 33.打包结构：spec 不再把 modules 收进 _MEIPASS/PYZ（excludes 防静态导入遮蔽），
+    build_exe.py 构建后复制整个 modules/ 到 dist/DGStudio/modules/（与 exe 同级，
+    携带的 mods/ 一并带走）；冻结态 main.py/plugins.py 把 exe 目录插入 sys.path
+    解析模块包导入；hiddenimports 显式收集 dglab（模块运行期依赖不在静态导入图）
+✔ 34.模块携带游戏端模组：META["mods"] = {dest, marker}，mods/ 内放已编译文件；
+    csproj Deploy 双目标（游戏 plugins + modules/alice_cradle/mods/）；
+    宿主新增 module_mods_dir / install_game_mod（校验 BepInEx、覆盖安装）/
+    scan_game_roots（盘符浅层扫描 marker）
+✔ 35.模块页「安装游戏模组」按钮：记住的 mods_root 秒装 → 后台线程全盘扫描
+    （UI 不卡）→ 失败转手动指定游戏 exe；成功后记忆路径
+
+验证：unittest 177 项全过（GameModTests 5 项）；selftest EXIT=0；build_exe 重建后
+dist/DGStudio/modules/ 与 exe 同级、_internal 无 modules、打包 selftest 通过
+（冻结态模块发现/加载正常）；实机验证一键安装：自动扫描命中游戏目录并完成释放。
+
+第十轮（模块页安装行 + 仪表盘模块通道 + 三轮反馈修复）：
+✔ 36.模块页游戏模组安装行移至按钮下一行：路径输入框 + 自动扫描 + 安装按钮，
+    可手动输入游戏根目录或扫描填入后安装
+✔ 37.仪表盘显示每个联动模块的双向通道（模块→核心 / 核心→模块，启用+探活 pill），
+    输入/输出数据值监控全模块通道（原仅 OSC），tick 签名补 module_data_sig
+✔ 38.反馈修复①：OSC 输入/输出基础条目与「VRChat OSC 联动」模块通道行重复——
+    桥运行时由模块行统一表达；根因 engine.osc 模块化后恒 None，判定改走模块状态
+✔ 39.反馈修复②：探活以对端实际通信为准（last_rx 5 秒内），游戏未启动如实显示
+    「等待回传」；expr 带点参数 id 缺设备时归 0（原报语法节点错误）
+✔ 40.反馈修复③：统计卡改「已启用数 + 共 N 条」短胶囊，不再罗列通道名溢出
+
+验证：unittest 187 项全过；selftest EXIT=0；实机截图核对去重/探活/统计卡；
+build_exe 重建且打包 selftest 通过。

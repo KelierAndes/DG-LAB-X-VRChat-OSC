@@ -439,5 +439,53 @@ class ConfigInitModuleTests(unittest.TestCase):
         self.assertEqual(self.manager.settings_for("osc_bridge")["rate_hz"], 10)
 
 
+class GameModTests(unittest.TestCase):
+    """模块携带游戏端模组：META 声明、mods/ 目录与一键释放安装。"""
+
+    def setUp(self):
+        self.engine = _FakeEngine()
+        self.manager = PluginManager(self.engine)
+        self.engine.modules = self.manager
+
+    def test_meta_declares_game_mod(self):
+        meta = self.manager.meta("alice_cradle")
+        self.assertEqual(meta["mods"]["dest"],
+                         "BepInEx/plugins/AliceInCradleLink")
+        self.assertEqual(meta["mods"]["marker"], "AliceInCradle.exe")
+        self.assertIsNone(self.manager.module_mods_dir("osc_bridge"))
+
+    def test_module_mods_dir_carries_dll(self):
+        mods = self.manager.module_mods_dir("alice_cradle")
+        self.assertTrue(mods)
+        self.assertTrue(os.path.isfile(
+            os.path.join(mods, "AliceInCradleLink.dll")))
+
+    def test_install_game_mod_to_bepinex_root(self):
+        root = tempfile.mkdtemp(prefix="dgstudio_game_")
+        os.makedirs(os.path.join(root, "BepInEx", "plugins"))
+        count = self.manager.install_game_mod("alice_cradle", root)
+        self.assertGreaterEqual(count, 1)
+        self.assertTrue(os.path.isfile(os.path.join(
+            root, "BepInEx", "plugins", "AliceInCradleLink",
+            "AliceInCradleLink.dll")))
+
+    def test_install_game_mod_rejects_non_bepinex_root(self):
+        root = tempfile.mkdtemp(prefix="dgstudio_game_")
+        with self.assertRaises(ValueError):
+            self.manager.install_game_mod("alice_cradle", root)
+
+    def test_scan_game_roots_finds_marker(self):
+        root = tempfile.mkdtemp(prefix="dgstudio_game_")
+        game = os.path.join(root, "Download", "Game Dir", "GameRoot")
+        os.makedirs(game)
+        with open(os.path.join(game, "AliceInCradle.exe"), "wb"):
+            pass
+        found = self.manager.scan_game_roots("aliceincradle.exe",
+                                             roots=[root], max_depth=4)
+        self.assertEqual(
+            [os.path.normcase(os.path.realpath(g)) for g in found],
+            [os.path.normcase(os.path.realpath(game))])
+
+
 if __name__ == "__main__":
     unittest.main()

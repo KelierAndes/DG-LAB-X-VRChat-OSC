@@ -73,6 +73,7 @@ class LinkPage(XamlClass, Page):
         self._pills: dict[str, object] = {}
         self._live_in: list[tuple] = []
         self._live_out: list[tuple] = []
+        self._live_signals: list[tuple] = []
         self._core_choices: list[tuple[str, str]] = []
         self._core_index: dict[str, int] = {}
         self._last_render = 0.0
@@ -116,6 +117,7 @@ class LinkPage(XamlClass, Page):
             self._pills = {}
             self._live_in = []
             self._live_out = []
+            self._live_signals = []
 
             content = W.stack(spacing=12, h="stretch")
             for meta in self.shell.engine.modules.list_modules():
@@ -218,12 +220,23 @@ class LinkPage(XamlClass, Page):
 
     def _insert_button(self, label: str, tokens, box) -> object:
         flyout = MenuFlyout()
-        for token in tokens:
-            shown, piece = token if isinstance(token, tuple) else (token, token)
-            item = MenuFlyoutItem()
-            item.Text = shown
-            item.Click += _append_token(box, piece)
-            flyout.Items.Append(item)
+        state = {"built": False}
+
+        def _opening(sender, args) -> None:
+            if state["built"]:
+                return
+            state["built"] = True
+            for token in tokens:
+                shown, piece = token if isinstance(token, tuple) else (token, token)
+                item = MenuFlyoutItem()
+                item.Text = shown
+                item.Click += _append_token(box, piece)
+                flyout.Items.Append(item)
+
+        try:
+            flyout.Opening += _opening
+        except AttributeError:
+            _opening(flyout, None)
         btn = W.button(W.text(label, size=12, color="text2"), width=48,
                        height=32)
         btn.Flyout = flyout
@@ -293,6 +306,10 @@ class LinkPage(XamlClass, Page):
             engine = engines.setdefault(module_id, self._engine(module_id))
             value = engine.out_values.get(name) if engine is not None else None
             tb.Text = _fmtv(value)
+        for tb, module_id, name in self._live_signals:
+            engine = engines.setdefault(module_id, self._engine(module_id))
+            value = engine.signals.get(name) if engine is not None else None
+            tb.Text = _fmtv(value)
 
     # ------------------------------------------------------- 统一模块卡片
 
@@ -302,6 +319,7 @@ class LinkPage(XamlClass, Page):
         cfg = self.shell.engine.modules.settings_for(module_id)
         varpool = self._var_pool(module_id)
         blocks = [
+            self._realtime_block(module_id, cfg),
             self._output_block(module_id, cfg, varpool),
             self._input_block(module_id, cfg, varpool),
             self._settings_block(module_id, spec, cfg, varpool),
@@ -316,6 +334,52 @@ class LinkPage(XamlClass, Page):
     def _dynamic(self, module_id: str) -> bool:
         return bool((self.shell.engine.modules.meta(module_id)
                      or {}).get("dynamic_params"))
+
+    # ------------------------------------------------------------- 实时数据
+
+    def _realtime_block(self, module_id: str, cfg: dict) -> object:
+        """实时数据子卡片：模块收到的输入数值实时状态（中英对照网格）。"""
+        meta = self.shell.engine.modules.meta(module_id) or {}
+        entries: list[tuple[str, str]] = [
+            (str(name), str((item or {}).get("label") or ""))
+            for name, item in (meta.get("params") or {}).items()]
+        engine = self._engine(module_id)
+        if engine is not None:
+            try:
+                known = {name for name, _label in entries}
+                for name in sorted(str(key) for key in engine.signals):
+                    if name not in known:
+                        entries.append((name, ""))
+            except Exception:
+                pass
+        inner = W.stack(spacing=6, h="stretch")
+        inner.Children.Append(W.text("实时数据（输入数值 · 中英对照）",
+                                     size=13, bold=W.SEMIBOLD))
+        inner.Children.Append(W.text(
+            "显示模块实际收到的输入数值；上为实时值，下为「中文说明 变量名」"
+            "（变量名即映射表达式中的 {名称}）。",
+            size=11, color="text3", wrap=True))
+        if not entries:
+            inner.Children.Append(self._placeholder_row(
+                "（暂无输入参数：模块运行并收到数据后自动出现）"))
+        for start in range(0, len(entries), 3):
+            g = W.grid(*[W.star(1)] * 3)
+            for i, (name, label) in enumerate(entries[start:start + 3]):
+                g.Children.Append(W.put(self._signal_cell(module_id, name,
+                                                          label), i))
+            inner.Children.Append(g)
+        return W.panel(inner, padding=14)
+
+    def _signal_cell(self, module_id: str, name: str, label: str) -> object:
+        value_tb = W.text("—", size=14, bold=W.SEMIBOLD, family="Consolas",
+                          trimming=True)
+        self._live_signals.append((value_tb, module_id, name))
+        caption = f"{label} {name}".strip()
+        cell = W.stack(spacing=1, margin=Thickness(0, 6, 10, 0))
+        cell.Children.Append(value_tb)
+        cell.Children.Append(W.text(caption, size=10, color="text3",
+                                    trimming=True))
+        return cell
 
     def _var_pool(self, module_id: str) -> list[str]:
         """表达式变量池：模块声明参数 ∪ 模块自定义参数 ∪ 核心输出参数 ∪ 运行期信号。"""

@@ -232,13 +232,49 @@ def osc_probe_card(engine) -> dict:
             "detail": [f"监听 :{in_port}", "未收到数据"]}
 
 
+def _osc_module_active(engine) -> bool:
+    """OSC 桥是否以模块通道形式在列（运行中且有映射行）——此时老的
+    「VRChat OSC 输入/输出」基础条目与之是同一条通道，不再单列。"""
+    try:
+        for module_id, _name, eng, runtime in module_engines(engine):
+            if module_id == "osc_bridge" \
+                    and getattr(runtime, "_running", False) \
+                    and (eng.mappings or eng.outputs):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _osc_bridge_running(engine) -> bool:
+    try:
+        for module_id, _name, _eng, runtime in module_engines(engine):
+            if module_id == "osc_bridge" \
+                    and getattr(runtime, "_running", False):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _osc_module_known(engine) -> bool:
+    try:
+        return any(m["id"] == "osc_bridge"
+                   for m in engine.modules.list_modules())
+    except Exception:
+        return False
+
+
 def link_counts(engine, state: EngineState) -> dict:
     """输入/输出链路计数与明细。
 
-    输入链路：控制与遥测进入应用的路径（OSC 输入、负鼠按键绑定、灵猫传感器）。
-    输出链路：应用向外下发数据的路径（OSC 输出、每台已接入输出设备）。
+    输入链路：控制与遥测进入应用的路径（OSC 输入、负鼠按键绑定、灵猫传感器、
+    各联动模块的「模块 → 核心」映射通道）。
+    输出链路：应用向外下发数据的路径（OSC 输出、每台已接入输出设备、
+    各联动模块的「核心 → 模块」映射通道）。
     """
-    osc_on = engine.osc is not None and getattr(engine.osc, "_running", False)
+    osc_module = _osc_module_active(engine)
+    osc_on = _osc_bridge_running(engine) and not osc_module
     inputs: list[tuple[str, str]] = []
     outputs: list[tuple[str, str]] = []
     if osc_on:
@@ -259,7 +295,82 @@ def link_counts(engine, state: EngineState) -> dict:
             inputs.append((f"{name} 传感", "气压 / 边缘状态遥测"))
         elif slot.is_output_device:
             outputs.append((name, "强度 / 波形下发"))
+    for _module_id, module_name, eng, _rt in module_engines(engine):
+        if eng.mappings:
+            inputs.append((f"{module_name} · 模块→核心",
+                           f"输入映射 {len(eng.mappings)} 条"))
+        if eng.outputs:
+            outputs.append((f"{module_name} · 核心→模块",
+                            f"输出映射 {len(eng.outputs)} 条"))
     return {"input": inputs, "output": outputs}
+
+
+def module_engines(engine) -> list[tuple[str, str, object, object]]:
+    """运行中联动模块的映射引擎 ``(module_id, 显示名, MappingEngine, runtime)``。
+
+    模块实例以 bridge（OSC）或 server（游戏数据类）属性承载共享映射引擎；
+    runtime 用于探活（其 last_rx / _last_rx 记录对端最近通信时间）。
+    """
+    out: list[tuple[str, str, object, object]] = []
+    try:
+        metas = engine.modules.list_modules()
+    except Exception:
+        return out
+    for meta in metas:
+        try:
+            inst = engine.modules.instance(meta["id"])
+        except Exception:
+            inst = None
+        if inst is None:
+            continue
+        runtime = getattr(inst, "bridge", None) or getattr(inst, "server", None)
+        eng = getattr(runtime, "engine", None) if runtime is not None else None
+        if eng is not None:
+            out.append((str(meta["id"]), str(meta["name"]), eng, runtime))
+    return out
+
+
+def _runtime_fresh(runtime) -> bool:
+    """对端 5 秒内有过通信（OSC 收包 / 游戏 POST）视为数据流动。"""
+    last = getattr(runtime, "last_rx", None)
+    if last is None:
+        last = getattr(runtime, "_last_rx", None)
+    return last is not None and (time.monotonic() - last) < 5.0
+
+
+def module_channel_rows(engine) -> list[dict]:
+    """联动模块双向通道行：模块→核心（输入）与 核心→模块（输出）各一条。
+
+    探活以**对端实际通信**为准：表达式错误 → 异常；对端 5 秒内有收发 →
+    数据流动中 / 回传中；否则（对端未启动 / 未发数据）→ 等待，即使引擎
+    已按缺省值算出输出也算未建立回传。
+    """
+    rows: list[dict] = []
+    for _module_id, module_name, eng, runtime in module_engines(engine):
+        errors = getattr(eng, "errors", {}) or {}
+        out_errors = getattr(eng, "out_errors", {}) or {}
+        fresh = _runtime_fresh(runtime)
+        mappings = len(getattr(eng, "mappings", {}) or {})
+        outs = len(getattr(eng, "outputs", {}) or {})
+        if mappings:
+            detail = next(iter(errors.values()), "")
+            rows.append({"module": module_name, "direction": "模块→核心",
+                         "count": mappings,
+                         "probe": "异常" if errors else
+                                  ("数据流动中" if fresh else "等待数据"),
+                         "probe_detail": detail,
+                         "probe_ok": False if errors else
+                                     (True if fresh else None)})
+        if outs:
+            detail = next(iter(out_errors.values()), "")
+            rows.append({"module": module_name, "direction": "核心→模块",
+                         "count": outs,
+                         "probe": "异常" if out_errors else
+                                  ("回传中" if fresh else "等待回传"),
+                         "probe_detail": detail,
+                         "probe_ok": False if out_errors else
+                                     (True if fresh else None)})
+    return rows
 
 
 def _stat_card(value: str, unit: str, label: str, *, symbol: str, accent: bool,
@@ -275,13 +386,15 @@ def stats(engine, log_buffer: LogBuffer) -> list[dict]:
     state = engine.get_state()
     devices = state.slots
     outputs = sum(1 for s in devices.values() if s.is_output_device)
-    links = link_counts(engine, state)
 
-    def detail_lines(items: list[tuple[str, str]]) -> list[str]:
-        labels = [label for label, _ in items]
-        if len(labels) > 3:
-            labels = labels[:2] + [f"等共 {len(labels)} 条"]
-        return labels or ["未启用"]
+    in_rows = input_channel_rows(engine, state)
+    module_rows = module_channel_rows(engine)
+    mod_in = sum(1 for r in module_rows if r["direction"] == "模块→核心")
+    mod_out = sum(1 for r in module_rows if r["direction"] == "核心→模块")
+    in_on = sum(1 for r in in_rows if r.get("enabled")) + mod_in
+    in_total = len(in_rows) + mod_in
+    out_on = len(output_channel_rows(state)) + mod_out
+    out_total = out_on
 
     return [
         _stat_card(str(len(devices)), "台", "已连接设备", symbol="CellPhone",
@@ -290,24 +403,45 @@ def stats(engine, log_buffer: LogBuffer) -> list[dict]:
         _stat_card(str(outputs), f"/ {max(len(devices), outputs)}", "输出设备",
                    symbol="Remote", accent=False,
                    trend=f"{len(devices) - outputs} 台传感器"),
-        _stat_card(str(len(links["input"])), "条", "已启用输入链路",
-                   symbol="Download", accent=bool(links["input"]),
-                   detail=detail_lines(links["input"])),
-        _stat_card(str(len(links["output"])), "条", "已启用输出链路",
-                   symbol="Upload", accent=bool(links["output"]),
-                   detail=detail_lines(links["output"])),
+        _stat_card(str(in_on), "条", "已启用输入链路",
+                   symbol="Download", accent=bool(in_on),
+                   trend=f"共 {in_total} 条"),
+        _stat_card(str(out_on), "条", "已启用输出链路",
+                   symbol="Upload", accent=bool(out_on),
+                   trend=f"共 {out_total} 条"),
     ]
+
+
+def module_data_sig(engine) -> tuple:
+    """联动模块数据签名（signals/out_values/errors 逐键值），供页面 tick
+    在模块数据变化时触发重建（设备状态与日志签名覆盖不到的部分）。"""
+    sig: list[tuple] = []
+    for module_id, _name, eng, _rt in module_engines(engine):
+        try:
+            sig.append(("s", tuple(sorted(eng.signals.items()))))
+            sig.append(("o", tuple(sorted((str(k), repr(v))
+                                          for k, v in eng.out_values.items()))))
+            sig.append(("e", tuple(sorted(eng.errors.items()))))
+            sig.append(("E", tuple(sorted(eng.out_errors.items()))))
+        except Exception:
+            continue
+    return tuple(sig)
 
 
 def input_channel_rows(engine, state: EngineState) -> list[dict]:
     """输入通道清单（含未启用的，界面据 enabled 显示状态胶囊）。"""
-    osc_on = engine.osc is not None and getattr(engine.osc, "_running", False)
-    rows = [{
-        "name": "VRChat OSC 输入",
-        "detail": "头像参数 → 首个同类型设备（强度/波形/开火/急停）",
-        "enabled": osc_on,
-        "hint": "" if osc_on else "在联动页开启 OSC 桥接",
-    }]
+    # OSC 桥运行且有映射行时由模块通道行统一表达（同一条通道，不重复列）；
+    # 模块已安装但未运行时显示「未启用」提示行。
+    show_osc_entry = _osc_module_known(engine) and not _osc_module_active(engine)
+    osc_on = _osc_bridge_running(engine)
+    rows = []
+    if show_osc_entry:
+        rows.append({
+            "name": "VRChat OSC 输入",
+            "detail": "头像参数 → 首个同类型设备（强度/波形/开火/急停）",
+            "enabled": osc_on,
+            "hint": "" if osc_on else "在模块页或联动页开启 VRChat OSC 联动",
+        })
     try:
         bindings = engine.ovc_bindings()
         profile = engine.config.get("ble", {}).get("ovc_profile", "")
@@ -370,15 +504,18 @@ def _input_value_text(value) -> str:
 
 
 def input_value_rows(engine, state: EngineState) -> list[dict]:
-    """输入数据值：OSC 最近收到的参数 + 灵猫传感器遥测。"""
+    """输入数据值：全部运行中模块收到的输入信号 + 灵猫传感器遥测。
+
+    模块行来源为共享映射引擎的 ``signals``（OSC 头像参数、游戏 MOD 上报的
+    命名数值等），逐一标注来源模块。
+    """
     rows: list[dict] = []
-    bridge = engine.osc
-    if bridge is not None:
-        for rec in bridge.recent_inputs():
-            rows.append({"name": rec["param"], "kind": "OSC 参数",
-                         "value": _input_value_text(rec["value"]),
-                         "age": f"{rec['age']:.0f} 秒前"})
-    for sid in sorted(state.slots):
+    for _module_id, module_name, eng, _rt in module_engines(engine):
+        for name in sorted(getattr(eng, "signals", {}) or {}):
+            rows.append({"name": name, "kind": module_name,
+                         "value": _input_value_text(eng.signals[name]),
+                         "age": "实时"})
+    for sid in sorted(getattr(state, "slots", {}) or {}):
         slot = state.slots[sid]
         if family_of(slot.type) != "BMTR":
             continue
@@ -389,6 +526,19 @@ def input_value_rows(engine, state: EngineState) -> list[dict]:
         rows.append({"name": f"{slot.name or slot.type or sid} EdgeState",
                      "kind": "传感器", "value": EDGE_STATES.get(edge, str(edge)),
                      "age": "实时"})
+    return rows
+
+
+def module_output_value_rows(engine) -> list[dict]:
+    """输出数据值的模块段：各运行中模块回传字段（核心 → 模块）的实时值。"""
+    rows: list[dict] = []
+    for _module_id, module_name, eng, _rt in module_engines(engine):
+        for name in sorted(getattr(eng, "out_values", {}) or {}):
+            spec = next((o for o in (eng.outputs or [])
+                         if str(o.get("name")) == name), None)
+            rows.append({"name": name, "kind": module_name,
+                         "value": _input_value_text(eng.out_values[name]),
+                         "age": str((spec or {}).get("type") or "")})
     return rows
 
 

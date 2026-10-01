@@ -42,6 +42,8 @@ def main() -> int:
         print(f"build failed (exit {code})")
         return code
 
+    copy_modules(ROOT / "modules", APP_DIR / "modules")
+
     for name, dst in saved.items():
         if dst.is_dir():
             shutil.copytree(dst, APP_DIR / name, dirs_exist_ok=True)
@@ -52,6 +54,19 @@ def main() -> int:
         print("no runtime files existed to restore")
     print(f"build ok: {APP_DIR / 'DGStudio.exe'}")
     return 0
+
+
+def copy_modules(src: Path, dst: Path) -> None:
+    """联动模块文件夹复制到产物根（与 exe 同级），跳过缓存文件。"""
+    if not src.is_dir():
+        print(f"modules/ missing, skip copy: {src}")
+        return
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(
+        src, dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+    print(f"copied modules/ -> {dst}")
 
 
 if __name__ == "__main__":

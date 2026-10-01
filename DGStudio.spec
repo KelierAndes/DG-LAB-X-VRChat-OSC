@@ -26,7 +26,9 @@ hiddenimports = (
     + collect_submodules("pythonosc")
     + collect_submodules("websockets")
     + collect_submodules("qrcode")
-    + collect_submodules("modules")
+    # 模块运行期（exe 旁 modules/ 的 plugin.py）导入的包不在主程序静态导入图里，
+    # 需显式收集：dglab.mapping / dglab.params 等仅被模块引用的引擎子模块
+    + collect_submodules("dglab")
 )
 
 # 页面 XAML 骨架是数据文件，运行时由 ui.paths 从 _MEIPASS/xaml 解析
@@ -36,19 +38,10 @@ datas = collect_data_files("win32more") + [
     if name.endswith(".xaml")
 ]
 
-# 联动模块全部打进包内（_MEIPASS/modules）：插件宿主在冻结态扫描该目录发现模块。
-# 显式逐文件收集，跳过 __pycache__；collect_submodules("modules") 负责包形式模块的
-# PYZ 兜底（单文件模块无 __init__.py，靠这里的源文件以路径加载）。
-MODULES_ROOT = os.path.join(SPECPATH, "modules")
-datas += [
-    (os.path.join(dirpath, fn),
-     ("modules" if dirpath == MODULES_ROOT
-      else "modules/" + os.path.relpath(dirpath, MODULES_ROOT).replace("\\", "/")))
-    for dirpath, dirnames, files in os.walk(MODULES_ROOT)
-    if "__pycache__" not in dirpath
-    for fn in files
-    if not fn.endswith((".pyc", ".pyo"))
-]
+# 联动模块不进包体：modules/ 整个文件夹由 build_exe.py 复制到产物根（与 exe 同级），
+# 用户可直接查看 / 替换 / 投放模块；运行期插件宿主扫描 exe 旁 modules/，
+# 包导入（modules.<id>.server）由冻结态引导把 exe 目录插入 sys.path 解析。
+# excludes 防止 ui.link_page 的静态导入把 modules 收进 PYZ 遮蔽用户侧文件。
 binaries = collect_dynamic_libs("win32more")
 
 a = Analysis(
@@ -60,7 +53,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["modules"],
     noarchive=False,
     optimize=1,
 )

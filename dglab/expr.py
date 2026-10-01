@@ -26,6 +26,7 @@ _FULLWIDTH = str.maketrans(
     "（）｛｝＋－／＊％．，０１２３４５６７８９",
     "(){}+-/*%.,0123456789")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_DOTTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
 _FUNCS = {"abs": abs, "min": min, "max": max, "round": round}
 
 
@@ -84,6 +85,9 @@ def _eval_python(src: str, values: dict[str, float]) -> float:
     # 变量名优先：核心参数 id 含点号（COYOTE.StrengthA），不是合法 Python 标识符
     if src in values:
         return float(values[src])
+    if _DOTTED.fullmatch(src):
+        # 带点参数 id（设备未接入时不在值表）按未定义变量归 0，不报语法错误
+        return 0.0
     try:
         tree = ast.parse(src, mode="eval")
     except SyntaxError as exc:

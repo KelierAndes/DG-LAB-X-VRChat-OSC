@@ -89,6 +89,7 @@ def pick_save_path(title: str = "另存为", *, default_name: str = "config.json
 
 def _make_dialog(shell, *, title: str, content, primary: str | None,
                  close: str) -> ContentDialog:
+    _dismiss_open_popups(shell)
     dialog = ContentDialog()
     dialog.Title = title
     dialog.Content = content
@@ -98,6 +99,41 @@ def _make_dialog(shell, *, title: str, content, primary: str | None,
     dialog.CloseButtonText = close
     dialog.XamlRoot = shell.RootGrid.XamlRoot
     return dialog
+
+
+def _dismiss_open_popups(shell) -> None:
+    """ContentDialog 的变暗遮罩盖不住 XAML Popup 层——打开中的下拉 / 联想
+    浮层会浮在遮罩上方。弹窗前先收起全部打开的浮层。"""
+    try:
+        root = shell.RootGrid
+        xaml_root = root.XamlRoot
+        if xaml_root is not None:
+            try:
+                from win32more.Microsoft.UI.Xaml.Media import VisualTreeHelper
+                popups = VisualTreeHelper.GetOpenPopupsForXamlRoot(xaml_root)
+                for i in range(popups.Size):
+                    popups.GetAt(i).IsOpen = False
+            except AttributeError:
+                _close_dropdowns_in_tree(root)
+    except Exception:
+        pass
+
+
+def _close_dropdowns_in_tree(element) -> None:
+    from win32more.Microsoft.UI.Xaml.Media import VisualTreeHelper
+
+    try:
+        count = VisualTreeHelper.GetChildrenCount(element)
+    except Exception:
+        return
+    for i in range(count):
+        child = VisualTreeHelper.GetChild(element, i)
+        try:
+            if child.IsDropDownOpen:
+                child.IsDropDownOpen = False
+        except Exception:
+            pass
+        _close_dropdowns_in_tree(child)
 
 
 async def confirm_dialog(shell, title: str, message: str, *,

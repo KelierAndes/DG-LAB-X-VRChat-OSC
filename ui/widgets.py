@@ -533,19 +533,39 @@ def slider(minimum: float, maximum: float, value: float, *, step: float = 1.0,
 
 def suggest_box(*, text: str = "", choices=None, placeholder: str = "",
                 width: float | None = None, on_commit=None) -> AutoSuggestBox:
-    """可任意输入、可从预定义项中选择的编辑框。"""
+    """可任意输入、可从预定义项中选择的编辑框。
+
+    预定义项在首次聚焦 / 输入时才填充：联动页每行一个输入框，逐项 Append
+    数千个联想项会让页面重建明显卡顿。
+    """
     box = AutoSuggestBox()
     box.Text = text
     if placeholder:
         box.PlaceholderText = placeholder
-    for choice in (choices or []):
-        box.Items.Append(str(choice))
     if width:
         box.Width = width
         box.HorizontalAlignment = _HALIGN["left"]
+
+    state = {"filled": not choices}
+
+    def _fill() -> None:
+        if state["filled"]:
+            return
+        state["filled"] = True
+        for choice in (choices or []):
+            box.Items.Append(str(choice))
+
+    try:
+        box.GotFocus += lambda sender, args: _fill()
+    except Exception:
+        pass
     if on_commit is not None:
-        box.TextChanged += lambda sender, args: on_commit((sender.Text or "").strip())
-        box.QuerySubmitted += lambda sender, args: on_commit((sender.Text or "").strip())
+        def _commit_handler(sender, args):
+            _fill()
+            on_commit((sender.Text or "").strip())
+
+        box.TextChanged += _commit_handler
+        box.QuerySubmitted += _commit_handler
     return box
 
 def number_box(value, minimum: float, maximum: float, *, width: float | None = None,

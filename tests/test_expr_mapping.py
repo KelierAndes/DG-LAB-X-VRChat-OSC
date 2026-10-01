@@ -36,6 +36,11 @@ class ExprTests(unittest.TestCase):
     def test_unknown_var_is_zero(self):
         self.assertAlmostEqual(expr.evaluate("{nope}*5+2", {}), 2.0)
 
+    def test_unknown_dotted_param_is_zero(self):
+        # 核心输出参数 id 带点号：设备未接入（不在值表）时按 0，不报语法节点错误
+        self.assertAlmostEqual(expr.evaluate("{COYOTE.StrengthA}+1", {}), 1.0)
+        self.assertAlmostEqual(expr.evaluate("{COYOTE.2.Battery}", {}), 0.0)
+
     def test_fullwidth_normalize(self):
         self.assertAlmostEqual(
             expr.evaluate("（{a}＋{b}）／２", {"a": 6, "b": 4}), 5.0)

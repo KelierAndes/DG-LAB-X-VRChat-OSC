@@ -8,6 +8,12 @@ import threading
 import time
 import traceback
 
+if getattr(sys, "frozen", False):
+    _exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if _exe_dir not in sys.path:
+        # modules/ 与 exe 同级：包导入（modules.<id>.server）从 exe 旁解析
+        sys.path.insert(0, _exe_dir)
+
 from win32more.winui3 import XamlApplication
 
 from ui.shell import App

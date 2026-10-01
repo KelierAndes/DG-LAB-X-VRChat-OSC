@@ -53,6 +53,9 @@ META = {
     "description": "一句话说明模块用途（显示在模块页）。",
     # 可选：模块提供的负鼠按键动作前缀（见 §3），供未加载时的配置反查
     # "actions": ["hello"],
+    # 可选：模块携带的游戏端模组——mods/ 内放已编译文件（dll 等），模块页出现
+    # 「一键安装游戏模组」按钮，释放到 <游戏根>/<dest>；marker 用于自动扫描游戏
+    # "mods": {"dest": "BepInEx/plugins/MyMod", "marker": "SomeGame.exe"},
 }
 
 from plugins import ModuleBase

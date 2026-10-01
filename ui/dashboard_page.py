@@ -18,6 +18,7 @@ class DashboardPage(XamlClass, Page):
         self.LoadComponentFromFile(xaml("DashboardPage.xaml"), encoding="utf-8")
         self._st = None
         self._lv = -1
+        self._mod_sig: tuple = ()
         self._last = 0.0
         self.rebuild()
 
@@ -26,8 +27,11 @@ class DashboardPage(XamlClass, Page):
         now = time.monotonic()
         if now - self._last < 0.4:
             return
-        if shell.state is self._st and shell.logs.version == self._lv:
+        mod_sig = live.module_data_sig(shell.engine)
+        if shell.state is self._st and shell.logs.version == self._lv \
+                and mod_sig == self._mod_sig:
             return
+        self._mod_sig = mod_sig
         self.rebuild()
 
     def on_notify(self) -> None:
@@ -45,6 +49,7 @@ class DashboardPage(XamlClass, Page):
         shell = self.shell
         self._st = shell.state
         self._lv = shell.logs.version
+        self._mod_sig = live.module_data_sig(shell.engine)
         self._last = time.monotonic()
 
         W.page_head(
@@ -220,7 +225,7 @@ class DashboardPage(XamlClass, Page):
     def _input_channels_card(self) -> object:
         inner = self._card_frame(
             "输入通道",
-            "控制输入与遥测进入应用的链路",
+            "控制输入与遥测进入应用的链路（设备 / 服务 / 模块）",
             symbol="Download",
             trailing=nav.link("联动设置", "link"),
         )
@@ -230,8 +235,20 @@ class DashboardPage(XamlClass, Page):
             if i:
                 body.Children.Append(W.divider())
             body.Children.Append(self._input_channel_row(entry))
+        module_rows = [r for r in live.module_channel_rows(self.shell.engine)
+                       if r["direction"] == "模块→核心"]
+        if module_rows:
+            body.Children.Append(W.divider())
+            body.Children.Append(self._section_note("联动模块（模块 → 核心）"))
+            for entry in module_rows:
+                body.Children.Append(self._module_channel_row(entry))
         inner.Children.Append(body)
         return W.card(inner)
+
+    def _section_note(self, text: str) -> object:
+        return W.box(height=30, child=W.text(text, size=11, color="text3",
+                                             bold=W.SEMIBOLD, v="center"),
+                     h="stretch")
 
     def _input_channel_row(self, entry: dict) -> object:
         fg, bg = (("success", "success_soft") if entry["enabled"]
@@ -248,10 +265,36 @@ class DashboardPage(XamlClass, Page):
                                        dot_color=fg if entry["enabled"] else None), 1))
         return W.box(height=48, child=g, h="stretch")
 
+    def _module_channel_row(self, entry: dict) -> object:
+        """联动模块通道行：名称 + 映射数 | 启用 pill + 探活 pill。"""
+        ok = entry.get("probe_ok")
+        if ok is True:
+            pfg, pbg = "success", "success_soft"
+        elif ok is False:
+            pfg, pbg = "danger", "danger_soft"
+        else:
+            pfg, pbg = "text3", "track"
+        g = W.grid(W.star(1), W.auto(), W.auto())
+        left = W.stack(spacing=2, v="center")
+        left.Children.Append(W.text(f"{entry['module']} · {entry['direction']}",
+                                    size=13, bold=W.SEMIBOLD, trimming=True))
+        detail = f"{entry['count']} 条映射 · 探活 {entry['probe']}"
+        if entry.get("probe_detail"):
+            detail += f"（{entry['probe_detail']}）"
+        left.Children.Append(W.text(detail, size=11, color="text3",
+                                    trimming=True))
+        g.Children.Append(W.put(left, 0))
+        g.Children.Append(W.put(W.pill("已启用", "success", "success_soft",
+                                       dot_color="success"), 1))
+        g.Children.Append(W.put(W.box(margin=Thickness(8, 0, 0, 0),
+                                      child=W.pill(entry["probe"], pfg, pbg),
+                                      v="center"), 2))
+        return W.box(height=48, child=g, h="stretch")
+
     def _output_channels_card(self) -> object:
         inner = self._card_frame(
             "输出通道",
-            "输出设备通道与探活状态",
+            "输出设备通道探活与联动模块回传通道",
             symbol="Remote",
             trailing=nav.link("设备控制", "control"),
         )
@@ -264,6 +307,13 @@ class DashboardPage(XamlClass, Page):
         if not rows:
             body.Children.Append(W.box(height=36, child=W.text(
                 "（未接入输出设备）", size=12, color="text3", v="center")))
+        module_rows = [r for r in live.module_channel_rows(self.shell.engine)
+                       if r["direction"] == "核心→模块"]
+        if module_rows:
+            body.Children.Append(W.divider())
+            body.Children.Append(self._section_note("联动模块（核心 → 模块）"))
+            for entry in module_rows:
+                body.Children.Append(self._module_channel_row(entry))
         inner.Children.Append(body)
         return W.card(inner)
 
@@ -287,11 +337,11 @@ class DashboardPage(XamlClass, Page):
     def _input_values_card(self) -> object:
         inner = self._card_frame(
             "输入数据值",
-            "OSC 输入参数与传感器实时数值",
+            "全部联动模块的输入信号与传感器实时数值",
             symbol="Contact",
             trailing=nav.link("参数映射", "link"),
         )
-        table_head = W.grid(W.star(1.4), W.fixed(64), W.star(1), W.fixed(74))
+        table_head = W.grid(W.star(1.4), W.fixed(96), W.star(1), W.fixed(74))
         gap = Thickness(12, 0, 0, 0)
         for label, col in (("参数", 0), ("来源", 1), ("当前值", 2), ("时间", 3)):
             cell = W.text(label, size=12, color="text3", margin=gap if col else None)
@@ -303,7 +353,7 @@ class DashboardPage(XamlClass, Page):
         lines = live.input_value_rows(self.shell.engine, self.shell.state)
         if not lines:
             rows.Children.Append(W.box(height=36, child=W.text(
-                "（暂无输入数据：桥接未运行或 VRChat 未发送）",
+                "（暂无输入数据：模块运行并收到数据后自动出现）",
                 size=12, color="text3", v="center")))
         for i, line in enumerate(lines):
             if i:
@@ -313,7 +363,7 @@ class DashboardPage(XamlClass, Page):
         return W.card(inner)
 
     def _input_value_row(self, line: dict) -> object:
-        g = W.grid(W.star(1.4), W.fixed(64), W.star(1), W.fixed(74))
+        g = W.grid(W.star(1.4), W.fixed(96), W.star(1), W.fixed(74))
         gap = Thickness(12, 0, 0, 0)
         g.Children.Append(W.put(W.text(line["name"], size=12, color="text2",
                                        trimming=True, v="center"), 0))
@@ -350,6 +400,24 @@ class DashboardPage(XamlClass, Page):
                 rows.Children.Append(W.divider())
             rows.Children.Append(self._output_value_row(line))
         inner.Children.Append(rows)
+
+        module_lines = live.module_output_value_rows(self.shell.engine)
+        if module_lines:
+            inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
+            inner.Children.Append(self._section_note("联动模块回传（核心 → 模块）"))
+            m_head = W.grid(W.star(1.4), W.fixed(96), W.star(1), W.fixed(74))
+            for label, col in (("字段", 0), ("来源", 1), ("当前值", 2), ("类型", 3)):
+                cell = W.text(label, size=12, color="text3",
+                              margin=gap if col else None)
+                m_head.Children.Append(W.put(cell, col))
+            inner.Children.Append(m_head)
+            inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
+            m_rows = W.stack(spacing=0)
+            for i, line in enumerate(module_lines):
+                if i:
+                    m_rows.Children.Append(W.divider())
+                m_rows.Children.Append(self._input_value_row(line))
+            inner.Children.Append(m_rows)
         return W.card(inner)
 
     def _output_value_row(self, line: dict) -> object:

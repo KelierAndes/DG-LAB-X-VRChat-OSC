@@ -45,7 +45,7 @@ ui/
 modules_page.py        模块：联动模块列表，实时安装/卸载/启动/停止，扫描新模块
 tests/                   协议与功能回归测试
 build_exe.py             打包辅助脚本
-DGStudio.spec            PyInstaller 打包配置（产物 DGStudio/dist，含 collect_submodules("modules")）
+DGStudio.spec            PyInstaller 打包配置（产物 DGStudio/dist；modules 不进包，由 build_exe.py 复制到 exe 同级）
 
 mods/AliceInCradleLink/  爱丽丝的摇篮 Unity 模组（BepInEx 5 / netstandard2.1，`dotnet build -t:Deploy` 部署到游戏）
   Plugin.cs                  入口：捕获主线程同步上下文 + 看门狗自愈重建 runner
@@ -503,6 +503,95 @@ OSC 的差别仅在参数表是动态建立的。
    `api.run(coro)` 会 `close()` 协程——fake 的 async 方法体不会执行，需在**调用时**
    （普通函数）记录并返回空协程。
 
+### Popup 遮罩层级 + 实时数据子卡片 + 联动页卡顿（2026-10-01 第十一轮）
+
+1. **弹窗遮罩盖不住下拉/联想浮层（`ui/dialogs.py`）**：ContentDialog 的变暗遮罩
+   在主树内，而 ComboBox 下拉、AutoSuggestBox 联想等浮层位于 XAML **Popup 层**，
+   永远渲染在遮罩之上（WinUI 平台层级，无法用 ZIndex 压制）。修复：`_make_dialog`
+   弹窗前 `_dismiss_open_popups`——优先 `VisualTreeHelper.GetOpenPopupsForXamlRoot`
+   逐个 `IsOpen=False`（win32more 无该投影时退回全树递归，把 `IsDropDownOpen`
+   的 ComboBox 收起，树走查 try/except 鸭式判定，非 ComboBox 直接吞掉 AttributeError）。
+2. **联动模块卡片新增「实时数据」子卡片（`ui/link_page.py`）**：每张模块卡片
+   顶部第一个块，展示模块收到的**输入数值**实时状态——条目 = META["params"]
+   声明参数（中文 label + 英文变量名）∪ 运行期 `engine.signals` 中的新增项
+   （OSC 动态头像参数等），3 列网格压缩排版；每格上行实时值（Consolas 粗体，
+   tick 0.5s 经 `_live_signals` 刷新），下行「中文说明 变量名」中英对照。
+   纯展示不可编辑；模块未运行显示 —。
+3. **联动页打开/添加映射卡顿（根因 = 每次重建急切创建数千浮层控件）**：
+   每行映射的「参数」MenuFlyout 曾逐项创建 varpool 全量 MenuFlyoutItem
+   （OSC 约 21 行 × 40 项 ≈ 840 个），AutoSuggestBox 又逐项 Append 联想项
+   （≈1500 个），加上 ComboBox 项，一次 rebuild 轻松 3000+ 控件。修复：
+   - MenuFlyout 改**首次 Opening 时填充**（`flyout.Opening` 事件惰性构建，
+     win32more 缺投影时 AttributeError 退回立即填充）；
+   - `W.suggest_box` 预定义项改**首次 GotFocus / 提交时填充**（`Items.Append`
+     延迟到用户真正输入时，联想行为不变）。
+   实测联动页秒开、添加映射即时重建。
+
+### 模块页安装行 + 仪表盘模块通道 + 三轮用户反馈（2026-10-01 第十三轮）
+
+1. **模块页游戏模组安装行**：携带 mods/ 的模块卡片在安装/卸载按钮**下一行**提供
+   「游戏模组 [路径输入框] [自动扫描] [安装游戏模组]」——路径可手动输入（游戏根
+   目录）或自动扫描填入，安装按输入框内容执行（空则回退 记住路径→扫描→手动指定）。
+   自动扫描在后台线程跑（全盘 DFS 深度 3），结果经 ui_queue 填回输入框；安装成功
+   后记忆 mods_root 并 rebuild。**坑：win32more Symbol 枚举没有 Search，用 Find**
+   （错误在 goto 页面构建时抛 E_FAIL，表现为 selftest "probe failed"，崩溃栈在
+   dgstudio_crash.log）。
+2. **仪表盘模块双向通道 + 全模块数据值**：`ui/live.module_engines()` 枚举运行中
+   模块的共享映射引擎（inst.bridge/server → .engine）；输入通道卡与输出通道卡
+   各追加「联动模块（模块→核心 / 核心→模块）」区块（行 = 启用 pill + 探活 pill +
+   映射数/错误详情）；输入数据值卡改为**全模块**输入信号（原 OSC recent_inputs
+   由 osc 模块 engine.signals 覆盖）+ 灵猫传感器；输出数据值卡追加「联动模块回传」
+   表（字段/来源/当前值/类型）。`dashboard.tick` 签名补 `module_data_sig`
+   （signals/out_values/errors 逐键值元组）——模块数据变化旧签名（state/logs）
+   感知不到，导致数据值卡不刷新。
+3. **反馈①通道去重**：VRChat OSC 输入/输出的**基础条目与「VRChat OSC 联动」模块
+   通道行是同一条通道**——OSC 桥运行且有映射行时基础条目不再单列
+   （`_osc_module_active`）；模块已装未运行时显示「未启用」提示行。**根因发现：
+   模块化之后 engine.osc 恒为 None（无人赋值），旧判断已失效**，全部改为以
+   osc_bridge 模块状态判定（_osc_bridge_running/_osc_module_known）。
+4. **反馈②探活语义**：探活改为以**对端实际通信**为准（runtime 的 last_rx /
+   _last_rx 5 秒内 = 数据流动中/回传中），游戏未启动时如实显示「等待回传」——
+   引擎按缺省值算出 out_values 不代表回传已建立。expr 带点参数 id（COYOTE.StrengthA）
+   设备未接入时按未定义变量归 0（此前 ast 解析成 Attribute 节点报「不支持的语法
+   节点」，输出表全体报错），_DOTTED 允许数字段（COYOTE.2.Battery）。
+5. **反馈③统计卡溢出**：输入/输出链路统计卡不再罗列通道名称，改为主值「已启用数」
+   + 右侧「共 N 条」短胶囊。
+6. **验证**：`Ran 187 tests OK`（dashboard 通道聚合 9 项含 OSC 去重/探活新语义）、
+   selftest EXIT=0、实机截图核对（统计 3/3+2/2、无重复通道、等待回传）、
+   build_exe 重建且打包 selftest EXIT=0。
+
+### 模块提升到 exe 同级 + 携带游戏模组一键安装（2026-10-01 第十二轮）
+
+1. **打包：modules/ 提升到与 exe 同级**：spec 不再把 modules 收进 `_MEIPASS` 或
+   PYZ（`excludes=["modules"]` 防止 ui.link_page 的静态导入把 modules 拉进 PYZ
+   遮蔽用户侧文件），`build_exe.py` 构建后把整个 `modules/` 复制到
+   `dist/DGStudio/modules/`（跳过 `__pycache__`/*.pyc，携带的 mods/ 一并带走）。
+   冻结态包导入（模块的 `from modules.<id>.server import …`）由
+   **plugins.py 模块级 + main.py 顶部**把 exe 目录插入 sys.path 解析
+   （plugins 先于 ui 导入时即生效）；`module_roots()` 移除 `_MEIPASS` 根。
+   **坑：`collect_submodules("modules")` 删除后，模块运行期引用的
+   `dglab.mapping` / `dglab.params` 不在任何静态导入图里，PyInstaller 不会
+   自动打包 → 冻结态 ModuleNotFoundError；hiddenimports 显式
+   `collect_submodules("dglab")` 解决。**
+2. **模块携带游戏端模组 + 一键安装**：模块 `META["mods"] = {"dest": 相对游戏根
+   的目标目录, "marker": 游戏主程序 exe 名}`，模块文件夹内 `mods/` 放已编译
+   模组文件（AIC 的 csproj Deploy 目标同时复制到
+   `modules/alice_cradle/mods/`）。宿主新增 `module_dir` / `module_mods_dir`
+   （存在且非空才返回）/ `install_game_mod(module_id, game_root)`（校验目标
+   含 BepInEx，逐文件 copy2 覆盖安装，返回文件数）/ `scan_game_roots(marker,
+   roots=None, max_depth=3)`（盘符浅层 DFS 扫描 marker）。模块页对携带 mods 的
+   模块显示「安装游戏模组」按钮，流程 = 模块配置记住的 `mods_root`（有效即
+   秒装）→ 后台线程全盘扫描（UI 不卡，日志提示）→ 失败弹窗转手动指定
+   （pick_open_path 选游戏 exe 取其目录）；成功后记住路径。实机验证：扫描
+   命中 E:\Download\...\AliceInCradle_ver030 并完成安装（全盘扫描约 70s，
+   一次性成本，之后秒装）。
+3. **验证**：`Ran 177 tests OK`（新增 GameModTests 5 项：META 声明、携带 dll、
+   BepInEx 释放安装、非 BepInEx 根拒绝、扫描命中）、`--selftest` EXIT=0、
+   `build_exe.py` 重建后 `dist/DGStudio/modules/` 与 exe 同级且 `_internal`
+   无 modules、打包 selftest EXIT=0（冻结态模块发现/加载正常）。
+   自检报告文件为 `%TEMP%\dgstudio_selftest.json`（`dglab_osc_selftest.json`
+   是旧版残留文件名，别再看错）。
+
 ### 爱丽丝的摇篮 MOD 注入实测结论（Unity / BepInEx）
 
 以下都是 v030 + Unity 2022.3.62f2 + BepInEx 5.4.23.5 实测踩到的坑，写新模组前必读：
@@ -558,7 +647,7 @@ OSC 的差别仅在参数表是动态建立的。
 * **OSC 测试必须用临时 UDP 端口**（`free_udp_port()`）：运行中的 exe 会占用 9001，固定端口会偶发绑定失败。Hub 服务同理用临时端口，且应用运行中 8920 被占用时相关用例 skipTest。
 * 蓝牙测试用 `FakeBleakClient`（构造签名需兼容 `disconnected_callback` kwarg），`simulate_drop()` 模拟意外掉线验证重连标记。
 * UI 验证用探针模式：`--selftest` 启动后由守护线程向 `App.window.ui_queue.put(check)` 注入检查闭包（逐页构建 + 每页 tick + 注入模拟 EngineState 验证控制页数值装配 + 可视化绑定写入 + 主题切换）。**自检引擎固定使用临时配置文件**（`App.engine_factory` 注入，`%TEMP%\dglab_osc_selftest_cfg.json`，每次运行前重建）——历史教训：探针曾直接操作用户 config.json，每次自检都把 SEL_1(bit0) 的绑定覆写成下拉第 1 项，表现为「绑定每次开启后被重置」。探针关闭窗口仍会 `save_config`，但写的是临时副本。另外 `Engine._disconnect_backend` 现在会补发一次空状态事件——否则断开后 `shell.state` 停留在最后一帧（二维码区不折叠、状态停在「等待扫码配对」）。
-* `--selftest` 报告写 `%TEMP%\dglab_osc_selftest.json`，崩溃栈写 `%TEMP%\dglab_osc_crash.log`。
+* `--selftest` 报告写 `%TEMP%\dgstudio_selftest.json`（自检引擎配置副本为同目录 `dgstudio_selftest_cfg.json`；`dglab_osc_selftest.json` 是旧版残留文件名），崩溃栈写 `%TEMP%\dgstudio_crash.log`。
 
 ---
 
@@ -575,7 +664,7 @@ OSC 的差别仅在参数表是动态建立的。
 
 * 打包要点：win32more 在运行期按类名动态导入投影模块，spec 里已 `collect_submodules` 收集 `win32more.Microsoft`、`Windows.Foundation/Graphics/UI`、`winrt`、`bleak` 等；`win32more/dll/x64` 的 Bootstrap DLL 与 `winui3/app.xaml` 按原包路径打进 `_internal`；**`xaml/` 页面骨架**由 spec 的 `datas` 段打进 `_internal\xaml`，运行时由 `ui/paths.py` 从 `_MEIPASS` 解析（新增页面 XAML 后无需改 spec）。
 * 运行时依赖：目标机器需安装 [Windows App Runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)（win32more 为框架依赖部署，Bootstrap DLL 负责引导；未装会弹官方提示或写入 `%TEMP%\dglab_osc_crash.log`）。
-* `DGLabOSC.exe --selftest`：启动窗口 3 秒后自动关闭，把检查结果写入 `%TEMP%\dglab_osc_selftest.json`（退出码 0 表示通过），用于验证打包产物。
+* `DGStudio.exe --selftest`：启动窗口数秒后自动关闭，把检查结果写入 `%TEMP%\dgstudio_selftest.json`（退出码 0 表示通过），用于验证打包产物。
 * 配置文件 `config.json` 生成在 exe 同目录；崩溃日志在 `%TEMP%\dglab_osc_crash.log`。
 * 如需单文件 exe（onefile），把 spec 中 `COLLECT` 段删掉并给 `EXE` 传 `a.binaries, a.datas` 即可，但启动会变慢且自解压目录可能与 DLL 引导冲突，不推荐。
 

@@ -16,6 +16,8 @@ import importlib
 import importlib.util
 import json
 import os
+import shutil
+import string
 import sys
 import traceback
 from typing import Any, Callable
@@ -26,6 +28,13 @@ def _base_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+if getattr(sys, "frozen", False):
+    _exe_dir = _base_dir()
+    if _exe_dir not in sys.path:
+        # modules/ 提升到 exe 同级后，模块的包导入（modules.<id>.server）从 exe 旁解析
+        sys.path.insert(0, _exe_dir)
 
 
 def _load_json_file(path: str) -> dict:
@@ -92,15 +101,8 @@ class JsonDict(dict):
 
 
 def module_roots() -> list[str]:
-    """模块扫描根列表：打包内置目录在前，exe 旁用户目录在后（可覆盖内置）。"""
-    roots: list[str] = []
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            roots.append(os.path.join(meipass, "modules"))
-        roots.append(os.path.join(_base_dir(), "modules"))
-    else:
-        roots.append(os.path.join(_base_dir(), "modules"))
+    """模块扫描根列表：modules/ 与 exe 同级（打包后由 build_exe.py 复制到产物根）。"""
+    roots: list[str] = [os.path.join(_base_dir(), "modules")]
     out: list[str] = []
     seen: set[str] = set()
     for root in roots:
@@ -302,6 +304,80 @@ class PluginManager:
         """用户模块目录（放这里的新模块可被「扫描模块目录」发现）。"""
         return module_roots()[-1]
 
+    def module_dir(self, module_id: str) -> str | None:
+        """模块文件夹（plugin.py 所在目录）。"""
+        path = self._paths.get(module_id)
+        return os.path.dirname(path) if path else None
+
+    def module_mods_dir(self, module_id: str) -> str | None:
+        """模块携带的游戏模组目录（modules/<id>/mods/，存在且非空才返回）。"""
+        module_dir = self.module_dir(module_id)
+        if not module_dir:
+            return None
+        mods = os.path.join(module_dir, "mods")
+        try:
+            if os.path.isdir(mods) and any(
+                    os.path.isfile(os.path.join(mods, name))
+                    for name in os.listdir(mods)):
+                return mods
+        except OSError:
+            pass
+        return None
+
+    def install_game_mod(self, module_id: str, game_root: str) -> int:
+        """把模块携带的游戏模组释放到游戏目录（BepInEx），返回安装文件数。"""
+        mods_cfg = dict((self.meta(module_id) or {}).get("mods") or {})
+        dest_rel = str(mods_cfg.get("dest") or "").strip("/\\")
+        mods_dir = self.module_mods_dir(module_id)
+        if not dest_rel or not mods_dir:
+            raise ValueError("该模块未携带游戏模组（META[\"mods\"] / mods/ 目录）")
+        if not os.path.isdir(os.path.join(game_root, "BepInEx")):
+            raise ValueError("目标目录不含 BepInEx，请选择游戏根目录")
+        dest = os.path.join(game_root, *dest_rel.split("/"))
+        os.makedirs(dest, exist_ok=True)
+        count = 0
+        for name in sorted(os.listdir(mods_dir)):
+            src = os.path.join(mods_dir, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(dest, name))
+                count += 1
+        return count
+
+    def scan_game_roots(self, marker: str, *,
+                        roots: list[str] | None = None,
+                        max_depth: int = 3) -> list[str]:
+        """在盘符根（或指定根列表）浅层扫描包含 marker 可执行文件的游戏目录。"""
+        marker = str(marker or "").strip().lower()
+        if not marker:
+            return []
+        if roots is None:
+            roots = [f"{drive}:\\" for drive in string.ascii_uppercase
+                     if os.path.isdir(f"{drive}:\\")]
+        found: list[str] = []
+        seen: set[str] = set()
+        stack = [(root, 0) for root in roots]
+        while stack:
+            cur, depth = stack.pop()
+            key = os.path.normcase(os.path.realpath(cur))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                entries = os.listdir(cur)
+            except OSError:
+                continue
+            if any(entry.lower() == marker for entry in entries):
+                found.append(cur)
+                continue
+            if depth >= max_depth:
+                continue
+            for entry in entries:
+                path = os.path.join(cur, entry)
+                if entry.startswith((".", "$")) or not os.path.isdir(path):
+                    continue
+                stack.append((path, depth + 1))
+        return found
+
     def _settings_stem(self, module_id: str) -> str:
         """模块设置文件名（不含扩展名）：实例/META 的 settings_key 优先，缺省用 id。"""
         inst = self._instances.get(module_id)
@@ -448,6 +524,7 @@ class PluginManager:
                     "config": dict(meta.get("config") or {}),
                     "params": dict(meta.get("params") or {}),
                     "reads": dict(meta.get("reads") or {}),
+                    "mods": dict(meta.get("mods") or {}),
                     "dynamic_params": bool(meta.get("dynamic_params", False)),
                     "default_enabled": bool(meta.get("default_enabled", False)),
                     "loaded": module_id in self._instances,

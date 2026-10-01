@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import os
+import threading
 import time
 
+from win32more import asyncui
 from win32more.Microsoft.UI.Xaml import Thickness
 from win32more.Microsoft.UI.Xaml.Controls import Page
 from win32more.winui3 import XamlClass
 
 from ui import nav, theme, widgets as W
+from ui.dialogs import confirm_dialog, pick_open_path
 from ui.paths import xaml
+
+_EXE_FILTER = "可执行文件 (*.exe)\0*.exe\0所有文件 (*.*)\0*.*\0"
 
 
 class ModulesPage(XamlClass, Page):
@@ -137,7 +143,51 @@ class ModulesPage(XamlClass, Page):
         inner.Children.Append(head)
         inner.Children.Append(W.divider())
         inner.Children.Append(foot)
+        if engine.modules.module_mods_dir(module_id):
+            inner.Children.Append(W.divider())
+            inner.Children.Append(self._game_mod_row(module_id))
         return W.card(inner)
+
+    def _game_mod_row(self, module_id: str) -> object:
+        """游戏模组安装行：路径输入框 + 自动扫描 + 一键安装。"""
+        engine = self.shell.engine
+        cfg = engine.modules.settings_for(module_id)
+        box = W.text_box(text=str(cfg.get("mods_root") or ""),
+                         placeholder="游戏根目录（含 BepInEx），可手动输入或自动扫描",
+                         width=330)
+
+        def _scan(sender, args) -> None:
+            self.shell.logs.append("正在扫描游戏目录…")
+
+            def worker() -> None:
+                marker = str(((engine.modules.meta(module_id) or {})
+                              .get("mods") or {}).get("marker") or "")
+                found = engine.modules.scan_game_roots(marker) if marker else []
+
+                def apply() -> None:
+                    if found:
+                        box.Text = found[0]
+                        self.shell.logs.append(
+                            f"扫描到 {len(found)} 处游戏目录，已填入第一处：{found[0]}")
+                    else:
+                        self.shell.logs.append(
+                            "未扫描到游戏目录，请手动输入游戏根目录后安装")
+
+                self.shell.ui_queue.put(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _install(sender, args) -> None:
+            self._install_game_mod(module_id, (box.Text or "").strip() or None)
+
+        row = W.stack(horizontal=True, spacing=8, v="center", h="stretch")
+        row.Children.Append(W.text("游戏模组", size=11, color="text3", v="center"))
+        row.Children.Append(box)
+        row.Children.Append(W.text_button("自动扫描", symbol="Find",
+                                          on_click=_scan))
+        row.Children.Append(W.text_button("安装游戏模组", symbol="Download",
+                                          accent=True, on_click=_install))
+        return row
 
     def _hint_card(self, title: str, body: str) -> object:
         inner = W.stack(spacing=6)
@@ -178,3 +228,84 @@ class ModulesPage(XamlClass, Page):
         self._run_module_action(
             self.shell.engine.modules.stop(module_id),
             f"模块已停止: {module_id}")
+
+    # -------------------------------------------------- 一键安装游戏模组
+
+    def _install_game_mod(self, module_id: str,
+                          root: str | None = None) -> None:
+        """模块携带的 mods/ 释放到游戏目录：路径框已填 / 记住的路径直接装，
+        否则后台扫描，再不行转手动指定。全部文件操作在后台线程执行。"""
+        self.shell.logs.append("正在定位游戏目录…")
+
+        def worker() -> None:
+            resolved, note = (root, "") if root \
+                else self._resolve_game_root(module_id)
+            if resolved is None:
+                self.shell.ui_queue.put(
+                    lambda: asyncui.create_task(
+                        self._pick_and_install_game_mod(module_id)))
+                return
+            try:
+                count = self.shell.engine.modules.install_game_mod(
+                    module_id, resolved)
+            except Exception as exc:
+                self.shell.logs.append(f"游戏模组安装失败: {exc}")
+                return
+
+            dest = str((self.shell.engine.modules.meta(module_id)
+                        or {}).get("mods", {}).get("dest") or "")
+
+            def done() -> None:
+                self._remember_mods_root(module_id, resolved)
+                self.shell.logs.append(f"游戏模组已安装（{count} 个文件）→ "
+                                       f"{resolved}\\{dest}{note}")
+                self.rebuild()
+
+            self.shell.ui_queue.put(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _resolve_game_root(self, module_id: str) -> tuple[str | None, str]:
+        modules = self.shell.engine.modules
+        cfg = modules.settings_for(module_id)
+        remembered = str(cfg.get("mods_root") or "").strip()
+        if remembered and os.path.isdir(os.path.join(remembered, "BepInEx")):
+            return remembered, ""
+        meta = modules.meta(module_id) or {}
+        marker = str((meta.get("mods") or {}).get("marker") or "")
+        if marker:
+            candidates = modules.scan_game_roots(marker)
+            if candidates:
+                return candidates[0], f"（自动扫描命中 {len(candidates)} 处，取第一处）"
+        return None, ""
+
+    def _remember_mods_root(self, module_id: str, root: str) -> None:
+        cfg = self.shell.engine.modules.settings_for(module_id)
+        if cfg.get("mods_root") != root:
+            cfg["mods_root"] = root
+            cfg.save()
+
+    async def _pick_and_install_game_mod(self, module_id: str) -> None:
+        ok = await confirm_dialog(
+            self.shell, "未自动找到游戏目录",
+            "没有在已保存路径和本机磁盘浅层扫描中定位到游戏。\n\n"
+            "点击「手动指定」选择游戏主程序（exe），将自动释放安装模组到其 "
+            "BepInEx 目录。",
+            primary="手动指定", close="取消")
+        if not ok:
+            self.shell.logs.append("已取消游戏模组安装")
+            return
+        picked = pick_open_path("选择游戏主程序", wildcard=_EXE_FILTER)
+        if not picked:
+            self.shell.logs.append("已取消游戏模组安装")
+            return
+        root = os.path.dirname(picked)
+        try:
+            count = self.shell.engine.modules.install_game_mod(module_id, root)
+        except Exception as exc:
+            self.shell.logs.append(f"游戏模组安装失败: {exc}")
+            return
+        self._remember_mods_root(module_id, root)
+        dest = str((self.shell.engine.modules.meta(module_id)
+                    or {}).get("mods", {}).get("dest") or "")
+        self.shell.logs.append(f"游戏模组已安装（{count} 个文件）→ {root}\\{dest}")
